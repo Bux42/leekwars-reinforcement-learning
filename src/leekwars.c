@@ -1,4 +1,5 @@
 #include "leekrl/leekwars.h"
+#include "leekrl/actions.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -52,30 +53,29 @@ static void observe(LwState *state, float *o)
     o[LEEKRL_LW_MP] = a ? (float)lw_entity_get_mp(a) : 0;
 }
 
-static void legal(LwState *state, LwEntity *a, LwEntity *b,
-                  LwWeapon *weapon, uint8_t *mask)
+static int legal(LwFight *fight, LwEntity *a, LwEntity *b,
+                 LwWeapon *weapon, uint8_t *mask)
 {
+    LwState *state = lw_fight_get_state(fight);
     LwCell *path[64];
     LwCell *from = lw_entity_get_cell(a), *to = lw_entity_get_cell(b);
-    int equip = lw_entity_get_weapon(a) != weapon;
-    int uses = lw_attack_get_max_uses(lw_weapon_get_attack(weapon));
+    leekrl_action fire;
+    leekrl_action_status status;
     memset(mask, 0, LEEKRL_LW_ACTION_COUNT);
     mask[LEEKRL_LW_WAIT] = 1;
     if (!from || !to || lw_entity_is_dead(b) || !lw_state_can_act(state, a))
-        return;
+        return 0;
     if (lw_entity_get_mp(a) > 0 &&
         !lw_entity_has_state(a, LW_ENTITY_STATE_STATIC) &&
         !lw_entity_has_state(a, LW_ENTITY_STATE_ROOTED) &&
         lw_map_get_path_between(lw_state_get_map(state), from, to, path, 64) > 0)
         mask[LEEKRL_LW_APPROACH] = 1;
-    if (!lw_entity_has_state(a, LW_ENTITY_STATE_AMPUTATED) &&
-        lw_entity_get_tp(a) >= equip &&
-        lw_entity_get_tp(a) - equip >= lw_weapon_get_cost(weapon) &&
-        (!equip || lw_entity_get_tp(a) > 0) &&
-        (uses == -1 || lw_entity_get_item_uses(a, lw_weapon_get_id(weapon)) < uses) &&
-        lw_map_can_use_attack(lw_state_get_map(state), from, to,
-                              lw_weapon_get_attack(weapon)))
-        mask[LEEKRL_LW_FIRE] = 1;
+    fire.kind = LEEKRL_ACTION_WEAPON;
+    fire.item_id = lw_weapon_get_id(weapon);
+    fire.dx = lw_cell_get_x(to) - lw_cell_get_x(from);
+    fire.dy = lw_cell_get_y(to) - lw_cell_get_y(from);
+    status = leekrl_action_mask(fight, a, &fire, 1, &mask[LEEKRL_LW_FIRE]);
+    return status == LEEKRL_ACTION_OK ? 0 : -1;
 }
 
 static int dispatch(LwFight *fight, LwEntity *entity, void *ai_file,
@@ -93,12 +93,16 @@ static int dispatch(LwFight *fight, LwEntity *entity, void *ai_file,
     if (!enemy) { r->failed = 1; return 0; }
     if (r->seen == r->context->count && !r->captured) {
         observe(state, r->observation);
-        legal(state, entity, enemy, r->context->weapon, r->mask);
+        if (legal(fight, entity, enemy, r->context->weapon, r->mask))
+            r->failed = 1;
         r->captured = 1;
     }
     if (r->seen >= r->context->count) return 0;
     action = r->context->actions[r->seen++];
-    legal(state, entity, enemy, r->context->weapon, mask);
+    if (legal(fight, entity, enemy, r->context->weapon, mask)) {
+        r->failed = 1;
+        return 0;
+    }
     if (action >= LEEKRL_LW_ACTION_COUNT || !mask[action]) {
         r->failed = 1;
         return 0;
@@ -107,11 +111,12 @@ static int dispatch(LwFight *fight, LwEntity *entity, void *ai_file,
         if (lw_state_move_toward(state, entity, lw_entity_get_fid(enemy), -1) <= 0)
             r->failed = 1;
     } else if (action == LEEKRL_LW_FIRE) {
-        if (lw_entity_get_weapon(entity) != r->context->weapon &&
-            !lw_state_set_weapon(state, entity, r->context->weapon))
-            r->failed = 1;
-        if (!r->failed &&
-            lw_state_use_weapon(state, entity, lw_entity_get_cell(enemy)) <= 0)
+        LwCell *from = lw_entity_get_cell(entity), *to = lw_entity_get_cell(enemy);
+        leekrl_action fire = {LEEKRL_ACTION_WEAPON, r->context->weapon_id,
+                              lw_cell_get_x(to) - lw_cell_get_x(from),
+                              lw_cell_get_y(to) - lw_cell_get_y(from)};
+        int result;
+        if (leekrl_action_execute(fight, entity, &fire, &result) != LEEKRL_ACTION_OK)
             r->failed = 1;
     }
     return 0;

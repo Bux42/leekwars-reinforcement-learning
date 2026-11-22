@@ -55,6 +55,93 @@ generator currently runs fights synchronously. This is a correctness-first
 prototype, not a high-throughput implementation. It uses only the low 31 bits
 of each seed and does not support concurrent generator use or registry changes.
 
+### Fixed actions and masks
+
+`leekrl/actions.h` provides reusable action descriptors for movement
+destinations, weapon casts, chip casts and ending a turn. Targets are relative
+to the acting entity in generator coordinates. `leekrl_action_cast_layout` builds a
+deterministically ordered list of range/launch-type offsets from an attack;
+for example, an inline range of 1–6 yields 24 slots. Add movement and end-turn
+slots separately.
+
+At each decision, `leekrl_action_mask` checks the current state, inventory,
+resources, cooldowns, range, line of sight and applicable generator rules.
+Recompute after every action. `leekrl_action_execute` rechecks and executes
+the selected action; return from the generator's AI callback to end a turn.
+A valid cast need not hit an entity or have a useful effect. Summons require
+registered templates and currently have no AI callback.
+
+`leekrl_action_catalog_create` builds a fixed catalog from **all currently
+registered** weapons and chips: end turn, 840 movement destinations, then weapons
+and chips ordered by item ID, with each item's offsets ordered by dy then dx.
+Register the complete intended item set before creating catalogs. Catalogs
+created from the same definitions have identical indices regardless of
+equipment. Unequipped items are masked. Adding or changing definitions changes
+the catalog and can invalidate saved models.
+
+Movement slots cover all offsets with Manhattan distance 1 through 20.
+The mask requires a free destination and a traversable path no longer than
+both the actor's current MP and 20 steps; execution follows a shortest path.
+This is a **per-action limit**, not a cap on the actor's MP. With more than
+20 MP, destinations requiring over 20 path steps cannot be selected in one
+action, though multiple movement actions can still spend the remaining MP.
+Changing this limit changes action indices and invalidates saved models.
+
+The generator's C data loaders are stubs. When `weapons.json`, `chips.json`
+and `summons.json` are present at the project root, CMake uses Python 3 to
+validate them with the standard `json` module and generate a C snapshot in
+the build directory. Python is only needed for generation, not at runtime.
+The supplied files are a snapshot; their provenance and currentness are not
+verified. Confirm redistribution rights before sharing them.
+
+Call `leekrl_item_snapshot_register` from `leekrl/item_snapshot.h` before
+creating battles or action catalogs. It requires empty weapon, chip **and**
+summon registries; the generator cannot enumerate summons to verify this.
+Destroy all battles first, then call `leekrl_item_snapshot_clear`. Do not
+modify registries or run generator sessions concurrently. Registration errors
+are reported through its error buffer. `LEEKRL_HAS_ITEM_SNAPSHOT` is defined
+when the files were available at CMake configure time.
+
+The snapshot hash returned by `leekrl_item_snapshot_hash` identifies the
+exact input bytes. Keep it with trained models: changing the data may change
+action indices. Weapon equipment IDs come from JSON `item`, not record `id`.
+If any files are absent, the core library builds without a snapshot; add all
+three files and reconfigure to enable it.
+
+The current generator limits entity inventories to 32 chips, even though the
+game's equipment model is not inherently limited to that number.
+
+### Multi-action battle environment
+
+`leekrl/battle.h` provides a separate 1v1 environment against an idle
+opponent. Each step executes one legal movement or cast, or ends the turn.
+Movement and casts can be chained within one turn. Create two `LwEntityInfo`
+builds, initialize `leekrl_battle_options`, then create a battle. Create the
+Gym wrapper with `leekrl_battle_observation_size`, the count from
+`leekrl_battle_catalog`, and `leekrl_battle_callbacks`. See
+`tests/test_battle.c` for an end-to-end example including PPO collection.
+Different builds can use separate battle contexts with the same item
+registries and therefore the same action indices.
+
+Observations begin with turn, own life, opponent life, TP and MP. The remaining
+floats form a channel-major, actor-centered grid described in `leekrl/grid.h`:
+boundary, obstacle, self, living allies, living enemies and dead entities.
+Rows and columns are relative generator coordinates, with the actor at the
+center. Radius is configurable; default 17. This is not a complete state
+representation: detailed stats, effects, cooldown values and equipment are
+not yet observation features.
+
+Rewards default to +1 win, -1 loss, 0 draw and 0 per decision. Options allow
+changing these values; no damage-based shaping is implemented. Turn-limit
+draws terminate; a configurable decision limit truncates with a valid final
+observation and mask for bootstrapping. Seeds use their low 31 bits.
+
+The generator runs a full synchronous fight, so the environment replays from
+the seed on every step. This is deterministic but expensive, especially for
+long episodes and large catalogs. Registries and item definitions must remain
+unchanged while contexts are in use. No concurrent generator use, opponent
+policy, self-play or automatic build randomization is provided yet.
+
 ## Masked PPO
 
 `leekrl/ppo.h` provides a seeded, one-hidden-layer policy/value network, masked
