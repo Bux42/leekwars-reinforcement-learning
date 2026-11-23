@@ -15,15 +15,17 @@ Since we want to train an agent to be "the best" in any kind of situation, durin
 A unique model will be trained for each fight type (1v1, 4v4 etc), starting with 1v1 fights (simplest fight type).
 We do not care about generalizing accross multiple different fight types.
 
-The hope is that some build + strategy will emerge, some new interesting strategies will be found, etc.
+The hope is that some build and / or strategy will emerge, some new interesting strategies will be found, etc.
 
 Since we want to generalize accross (for example) 1v1 fights, the proposition is to start by including ALL castables in the agent's action space.
 
+And since the agent will be able to summon entities, the castable of those entities also needs to be in the action space.
+
 Here is what the action space would look like:
 Action 0: end turn
-Action 1 - 841: movement actions (840 accessible cells assuming the max movement points the agent will ever have in fights is 20)
+Action 1 - 841: movement actions (840 accessible cells assuming the max movement points the agent will ever have in fights is 20, same arbitrary limitation as the 32 max chips, might need a revisit at some point)
 Action 841 - 954: weapon pistol actions (113 reachable cells with range 1 - 7)
-etc until all castables that the agent might have is in the action space
+etc until all castables that the agent might use in a fight is in the action space
 
 So every possible action must be present.
 
@@ -36,7 +38,7 @@ There are other castables that enters this category.
 
 Both the actions and the observation will be "relative" to the agent's current position in game, meaning it will be from it's point of vue.
 
-What that means is that (for example) if action 1 is "move on the tile up", when the agent picks it, the result will always be it moving one tile up. Same for casting, the actions will represent casting positions RELATIVE to the agent's POV.
+What that means is that (for example) if action 1 is "move on the tile up", when the agent picks it, the result will always be it moving one tile up, regardless of it's absolute position on the map. Same for casting, the actions will represent casting positions RELATIVE to the agent's POV.
 
 The reason is better generalization during training (and efficiency).
 
@@ -53,11 +55,11 @@ The map observation will contain floats representing what is on which tile, with
 
 The observation will also contain all relevant information about all entities, including itself.
 
-The entity obs will start with the current entity, then all other entities.
+The entity obs will start with the current playing entity (it's position in the obs must always be the same), then all other entities.
 The other entities will be sorted by order of turn, such as the next playing entities will be "first" in the entity observation order.
 
 Since some chips can be used to summon other entities, controlled by the caster, we're gonna need to precompute / guesstimate the max possible number of entities in a fight, to reduce the chance of the entity obs "overflowing" in a fight where there are 50 entities.
-I think that, same as the arbitrary 20 movement points and 32 equipped chips limit, we should find a reasonable number, I don't think it's relevant to be able to handle 100 entities in a fight when there is 0.0001% chance of it happening.
+I think that, same as the arbitrary 20 movement points and 32 equipped chips limit, we should find a reasonable number, I don't think it's relevant to be able to handle 100 entities in a fight when there is 0.0001% chance of it happening. But who knows, maybe there is an undiscovered "good" strategy resulting in "unconventional" fights
 
 It will contain all relevant information:
 
@@ -81,17 +83,18 @@ And in the past, I've noticed that putting the action mask itself in the agent's
 
 For the actual fights during training, the randomization of those fights will be important.
 
-To start, we're gonna want each leek to have 4 unique weapons equipped, with a random pick amongst all available weapons (there is a rule that forbids having multiple legendary weapons equipped that needs to be respected).
+To start, we're gonna want each leek to have 4 unique weapons equipped, with a random pick amongst all available weapons (there is a rule that forbids having multiple legendary weapons equipped that needs to be respected, you also can't have the same weapon equipped twice).
 
-For the chips, as the number of chips one entity can equip is directly linked to the entity's RAM, we have to first generate the entity's stats.
+For the chips, as the number of chips one entity can equip is directly linked to the entity's RAM, we have to first generate the entity's stats. You can't equip the same chip twice.
 
-Important: Some chips are only relevant in specific fight types. For example, CHIP_EXASPERATION can only be equipped on a specific type of boss. It would be irrelevant to include it in 1v1 fights. The WEAPON_SCYTHE is also an exception, this weapon can only be used by the pumpkin boss.
+Important: Some chips are only present in specific fight types. For example, CHIP_EXASPERATION can only be equipped on a specific type of boss. It would be irrelevant to include it in (for example) 1v1 fights where a boss will never be present. The WEAPON_SCYTHE is also an exception, this weapon can only be used by the pumpkin boss.
 
 We're gonna only train entities at level 301 to start with, meaning there will be 1780 available capital points, that can be spent in the following characteristics: life, strength, wisdom, agility, resistance, science, magic, frequency, cores, ram, tp, mp
 
 Not each characteristic attribution costs the same, and there are threshold that, when reached, increase the cost for the subsequent point allocations.
+So the agent's stats must be "legal"
 
-The entity stats will be attributed such there aren't enough available capital points to raise any individual stat.
+The entity stats will be attributed such there aren't enough available capital points to raise any individual stat. (all capital points must be spent)
 
 The game has "components", which are equipable items that gives additionnal stats points.
 You can only equip up to 8 unique components at a time.
@@ -102,13 +105,14 @@ We might also want to exclude "irrelevant" components like the COMPONENT_RGB tha
 Components can be altered, meaning it's stats can be changed.
 To start, we will disregard this mechanic (but in the future, we will for sure play around with it), as I don't really understand it, but it is possible to (for example) add an additionnal TP to a component.
 
-To keep the "max 32 chips" arbitrary rule respected, that randomized stats attribution shouldn't exceed 32 RAM.
-Or the equipped chips randomization musn't exceed 32 chips. No duplicate equipped chips are allowed.
+To keep the "max 32 chips" arbitrary rule respected, the equipped chips randomization musn't exceed 32 chips.
 
 I also want the training to randomly pick a full build config amongst a list of "known" builds, provided by me.
 There are some specific builds that are the "meta" in the game (poison builds, OTK builds, nova builds etc). And having the agent pick those builds sometimes (don't know what the "good" probability of picking those build would be) will be very interesting, as we will see how the agent plays on those known builds.
 
-The generation (obstacles and fight placements) must also be random (except for some exceptions, like for example, the boss fights, but that's for waaaay later)
+The generation (obstacles and fight placements) must also be random (except for some exceptions, like for example, the boss fights, but that's for waaaay later).
+I think the official implementation of map obstacles + placements should be okay?
+Some edge case I have in mind is, for example, a entity with a start position inside an area blocked by obstacles, but I don't know if that's even possible.
 
 ## Reward shaping
 
@@ -116,14 +120,35 @@ The first version of the reward will be the following:
 Winning a fight gives big reward, losing a fight loses big reward (main goal is to win)
 When winning a fight, additionnal reward will be given based on:
 
-- Fight duration (shorted fights -> bigger reward, encouraging more efficient actions, thus indirectly speeding up training)
+- Fight duration (shorter fights -> bigger reward, encouraging more efficient actions, thus indirectly speeding up training)
 - Total actions (if an agent can move to it's destination in 1 action, but does it in 3 consecutive movements, we want it to favor one action instead)
 
 Killing an entity should give fixed reward (smaller for summons)
 Getting an ally killed should gived fixed negative reward (smaller for summons as well)
 
-Inflicting damage gives reward proportionnal to the damage
-Recieving damage loses reward proportionnal to the damage
+Inflicting damage gives reward proportionnal to the damage (smaller for summons as well)
+Recieving damage loses reward proportionnal to the damage (smaller for summons as well)
 
 There are different types of damage (direct, poison, after effect, nova etc)
 Not sure how each should be dealt with in terms of reward, but it should "steer" the agent and help it converge faster, as fights can be quite long.
+I also don't know if the generator exposes this data, nor if we should implement stuff on it to do so (would it be the right place to implement that?)
+
+## Deterministic training
+
+For the sake of sanity, a deterministic mode should be available so that two training runs with the exact same configuration gives the same result
+
+## Metrics
+
+Some basic metrics should be available.
+
+- Average fight turn count
+- Average draws percentage (if fight ends before anyone wins)
+- Average agent fight end life percentage
+- Average agent total action per fight
+- Total fights
+- Fights per second
+
+Along with the "usual" (or default?) weights & biases metrics.
+
+Ideally, we'd be able to use weights & biases.
+We'll confirm determinism by checking the metrics of two consecutive training runs in "deterministic mode"
