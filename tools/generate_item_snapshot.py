@@ -11,6 +11,9 @@ from pathlib import Path
 INT_MAX = 2**31 - 1
 STATS = ("life", "strength", "wisdom", "agility", "resistance",
          "science", "magic", "tp", "mp")
+# Same order as leekrl_stat in item_snapshot.h.
+COMPONENT_STATS = ("life", "strength", "wisdom", "agility", "resistance", "science",
+                   "magic", "frequency", "cores", "ram", "tp", "mp")
 
 
 def fail(message):
@@ -202,8 +205,39 @@ def summon_lines(records, chip_ids):
     return lines, ids
 
 
-def generate(weapons, chips, summons, snapshot_hash):
+def component_rows(records):
+    rows, names = [], set()
+    if len(records) > 256:
+        fail("too many components")
+    for record in records:
+        ident = integer(record["id"], "component id", 1)
+        name = text(record["name"], f"component {ident} name", 64)
+        if name in names:
+            fail(f"component {ident}: duplicate name")
+        names.add(name)
+        stats = dict.fromkeys(COMPONENT_STATS, 0)
+        seen = set()
+        for pair in record["stats"]:
+            if not isinstance(pair, list) or len(pair) != 2:
+                fail(f"component {ident}: stats must be [name, value] pairs")
+            stat, value = pair
+            if stat not in stats or stat in seen:
+                fail(f"component {ident}: unknown or duplicate stat {stat!r}")
+            seen.add(stat)
+            stats[stat] = integer(value, f"component {ident} {stat}", -100000, 100000)
+        rows.append(f"    {{{ident}, {name}, {{{', '.join(map(str, stats.values()))}}}}}")
+    return rows
+
+
+def forgotten_ids(weapons):
+    return [integer(weapon["item"], "weapon item", 1) for weapon in weapons
+            if boolean(weapon["forgotten"], f"weapon {weapon['id']} forgotten")]
+
+
+def generate(weapons, chips, summons, components, snapshot_hash):
     declarations, refs = [], set()
+    components_c = component_rows(components)
+    forgotten = forgotten_ids(weapons)
     weapon_lines, _ = item_lines(weapons, True, declarations, refs)
     chip_lines, chip_ids = item_lines(chips, False, declarations, refs)
     bulb_lines, bulb_ids = summon_lines(summons, chip_ids)
@@ -230,6 +264,22 @@ static LwChip chips[{max(1, len(chips))}];
 static LwBulbTemplate summons[{max(1, len(summons))}];
 static int active;
 static size_t initialized_summons;
+static const leekrl_component components[] = {{
+{("," + chr(10)).join(components_c) or '    {0}'}
+}};
+static const int forgotten[] = {{{', '.join(map(str, forgotten + [0]))}}};
+
+const leekrl_component *leekrl_components(size_t *count) {{
+    if (count) *count = {len(components_c)};
+    return components;
+}}
+
+int leekrl_weapon_forgotten(int item_id) {{
+    size_t i;
+    for (i = 0; i < {len(forgotten)}; ++i)
+        if (forgotten[i] == item_id) return 1;
+    return 0;
+}}
 
 const char *leekrl_item_snapshot_hash(void) {{ return "{snapshot_hash}"; }}
 
@@ -270,14 +320,16 @@ def main():
     parser.add_argument("--weapons", required=True, type=Path)
     parser.add_argument("--chips", required=True, type=Path)
     parser.add_argument("--summons", required=True, type=Path)
+    parser.add_argument("--components", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
         weapons, whash = read_catalog(args.weapons)
         chips, chash = read_catalog(args.chips)
         summons, shash = read_catalog(args.summons)
-        snapshot_hash = hashlib.sha256(whash + chash + shash).hexdigest()
-        generated = generate(weapons, chips, summons, snapshot_hash)
+        components, cohash = read_catalog(args.components)
+        snapshot_hash = hashlib.sha256(whash + chash + shash + cohash).hexdigest()
+        generated = generate(weapons, chips, summons, components, snapshot_hash)
         args.output.write_text(generated, encoding="utf-8", newline="\n")
     except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
         print(f"item snapshot generation failed: {error}", file=sys.stderr)

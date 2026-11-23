@@ -7,6 +7,25 @@
 extern "C" {
 #endif
 
+/* Characteristics capital can be spent on, and components can change. */
+typedef enum {
+    LEEKRL_STAT_LIFE, LEEKRL_STAT_STRENGTH, LEEKRL_STAT_WISDOM, LEEKRL_STAT_AGILITY,
+    LEEKRL_STAT_RESISTANCE, LEEKRL_STAT_SCIENCE, LEEKRL_STAT_MAGIC, LEEKRL_STAT_FREQUENCY,
+    LEEKRL_STAT_CORES, LEEKRL_STAT_RAM, LEEKRL_STAT_TP, LEEKRL_STAT_MP, LEEKRL_STAT_COUNT
+} leekrl_stat;
+
+typedef struct {
+    int id;
+    const char *name;
+    int stats[LEEKRL_STAT_COUNT];
+} leekrl_component;
+
+/* Components sorted by id. Available without registering the snapshot. */
+const leekrl_component *leekrl_components(size_t *count);
+
+/* Legendary weapons are called forgotten in the game data. */
+int leekrl_weapon_forgotten(int item_id);
+
 /*
  * Register the build-time item snapshot in empty generator registries.
  * The bulb registry must also be empty: the generator cannot enumerate it.
@@ -19,7 +38,7 @@ extern "C" {
 int leekrl_item_snapshot_register(char *error, size_t error_size);
 void leekrl_item_snapshot_clear(void);
 
-/* SHA-256 of the three input file hashes, in weapons/chips/summons order. */
+/* SHA-256 of the input file hashes: weapons, chips, summons, components. */
 const char *leekrl_item_snapshot_hash(void);
 
 #ifdef __cplusplus

@@ -10,13 +10,13 @@ def weapon():
         "id": 15, "item": 108, "name": 'sword?"',
         "cost": 5, "min_range": 1, "max_range": 1,
         "launch_type": 1, "area": 1, "los": True, "template": 15,
-        "max_uses": 2, "effects": [], "passive_effects": [],
+        "max_uses": 2, "effects": [], "passive_effects": [], "forgotten": False,
     }
 
 
 class SnapshotGeneratorTests(unittest.TestCase):
     def test_weapon_uses_equipment_id_and_escapes_name(self):
-        source = generate([weapon()], [], [], "hash")
+        source = generate([weapon()], [], [], [], "hash")
         self.assertIn("lw_weapon_init(&weapons[0], 108, 5, 1, 1,", source)
         self.assertIn(r'sword\077\042', source)
 
@@ -24,11 +24,25 @@ class SnapshotGeneratorTests(unittest.TestCase):
         bad = weapon()
         del bad["item"]
         with self.assertRaises(KeyError):
-            generate([bad], [], [], "hash")
+            generate([bad], [], [], [], "hash")
         other = copy.deepcopy(weapon())
         other.update(id=16, name="other", template=16)
         with self.assertRaisesRegex(ValueError, "duplicate item id"):
-            generate([weapon(), other], [], [], "hash")
+            generate([weapon(), other], [], [], [], "hash")
+
+    def test_forgotten_weapons_are_listed(self):
+        other = copy.deepcopy(weapon())
+        other.update(id=16, item=109, name="other", template=16, forgotten=True)
+        source = generate([weapon(), other], [], [], [], "hash")
+        self.assertIn("forgotten[] = {109, 0};", source)
+
+    def test_component_stats_follow_the_enum_order(self):
+        component = {"id": 7, "name": "plate", "stats": [["mp", -1], ["life", 300]]}
+        source = generate([], [], [], [component], "hash")
+        self.assertIn('{7, "plate", {300, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1}}', source)
+        for stats in ([["luck", 1]], [["life", 1], ["life", 2]], [["life", 1.5]]):
+            with self.assertRaises(ValueError):
+                generate([], [], [], [{"id": 7, "name": "plate", "stats": stats}], "hash")
 
     def test_duplicate_keys_and_invalid_values_fail(self):
         with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
@@ -39,7 +53,7 @@ class SnapshotGeneratorTests(unittest.TestCase):
             "turns": 0, "targets": 31, "modifiers": 0,
         }]
         with self.assertRaisesRegex(ValueError, "finite number"):
-            generate([bad], [], [], "hash")
+            generate([bad], [], [], [], "hash")
 
     def test_unknown_summon_reference_fails(self):
         bad = weapon()
@@ -48,7 +62,7 @@ class SnapshotGeneratorTests(unittest.TestCase):
             "turns": 0, "targets": 31, "modifiers": 0,
         }]
         with self.assertRaisesRegex(ValueError, "unknown summon references"):
-            generate([bad], [], [], "hash")
+            generate([bad], [], [], [], "hash")
 
 
 if __name__ == "__main__":

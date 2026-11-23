@@ -59,7 +59,8 @@ if(BUILD_TESTING)
 
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/weapons.json" AND
        EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/chips.json" AND
-       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/summons.json")
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/summons.json" AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/components.json")
         add_executable(test_item_battle tests/test_item_battle.c)
         target_link_libraries(test_item_battle PRIVATE leekrl)
         add_test(NAME leekwars_item_battle COMMAND test_item_battle)
@@ -71,12 +72,17 @@ if(BUILD_TESTING)
         add_executable(test_plant_ai tests/test_plant_ai.c)
         target_link_libraries(test_plant_ai PRIVATE leekrl)
         add_test(NAME leekwars_plant_ai COMMAND test_plant_ai)
+
+        add_executable(test_build tests/test_build.c)
+        target_link_libraries(test_build PRIVATE leekrl)
+        add_test(NAME leekwars_build COMMAND test_build)
     endif()
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/weapons.json" AND
    EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/chips.json" AND
-   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/summons.json")
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/summons.json" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/components.json")
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     set(LEEKRL_SNAPSHOT_C "${CMAKE_CURRENT_BINARY_DIR}/item_snapshot.c")
     add_custom_command(
@@ -86,14 +92,16 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/weapons.json" AND
             --weapons "${CMAKE_CURRENT_SOURCE_DIR}/weapons.json"
             --chips "${CMAKE_CURRENT_SOURCE_DIR}/chips.json"
             --summons "${CMAKE_CURRENT_SOURCE_DIR}/summons.json"
+            --components "${CMAKE_CURRENT_SOURCE_DIR}/components.json"
             --output "${LEEKRL_SNAPSHOT_C}"
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_item_snapshot.py"
             "${CMAKE_CURRENT_SOURCE_DIR}/weapons.json"
             "${CMAKE_CURRENT_SOURCE_DIR}/chips.json"
             "${CMAKE_CURRENT_SOURCE_DIR}/summons.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/components.json"
         VERBATIM)
-    target_sources(leekrl PRIVATE "${LEEKRL_SNAPSHOT_C}")
+    target_sources(leekrl PRIVATE "${LEEKRL_SNAPSHOT_C}" src/build.c)
     target_compile_definitions(leekrl PUBLIC LEEKRL_HAS_ITEM_SNAPSHOT=1)
     if(BUILD_TESTING)
         add_test(NAME leekwars_snapshot_generator

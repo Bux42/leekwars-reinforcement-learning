@@ -65,7 +65,8 @@ deterministically ordered list of range/launch-type offsets from an attack;
 for example, an inline range of 1–6 yields 24 slots. Add movement and end-turn
 slots separately.
 
-At each decision, `leekrl_action_mask` checks the current state, inventory,
+At each decision, `leekrl_action_catalog_mask` (or `leekrl_action_mask` for any
+list of actions) checks the current state, inventory,
 resources, cooldowns, range, line of sight and applicable generator rules.
 Recompute after every action. `leekrl_action_execute` rechecks and executes
 the selected action; return from the generator's AI callback to end a turn.
@@ -89,9 +90,9 @@ This is a **per-action limit**, not a cap on the actor's MP. With more than
 action, though multiple movement actions can still spend the remaining MP.
 Changing this limit changes action indices and invalidates saved models.
 
-The generator's C data loaders are stubs. When `weapons.json`, `chips.json`
-and `summons.json` are present at the project root, CMake uses Python 3 to
-validate them with the standard `json` module and generate a C snapshot in
+The generator's C data loaders are stubs. When `weapons.json`, `chips.json`,
+`summons.json` and `components.json` are present at the project root, CMake uses
+Python 3 to validate them with the standard `json` module and generate a C snapshot in
 the build directory. Python is only needed for generation, not at runtime.
 The supplied files are a snapshot; their provenance and currentness are not
 verified. Confirm redistribution rights before sharing them.
@@ -108,7 +109,7 @@ The snapshot hash returned by `leekrl_item_snapshot_hash` identifies the
 exact input bytes. Keep it with trained models: changing the data may change
 action indices. Weapon equipment IDs come from JSON `item`, not record `id`.
 If any files are absent, the core library builds without a snapshot; add all
-three files and reconfigure to enable it.
+four files and reconfigure to enable it.
 
 The current generator limits entity inventories to 32 chips, even though the
 game's equipment model is not inherently limited to that number.
@@ -141,14 +142,22 @@ draws terminate; a configurable decision limit truncates with a valid final
 observation and mask for bootstrapping. Seeds use their low 31 bits.
 
 The fight stays suspended between steps, so a step only executes its own action
-(`lw_fight_step_*` in the submodule's `lw_fight.h`). Computing the mask over the
-whole catalog is the main remaining cost. Registries and item definitions must
+(`lw_fight_step_*` in the submodule's `lw_fight.h`). Registries and item definitions must
 remain unchanged while contexts are in use. No concurrent generator use, opponent
 policy, self-play or automatic build randomization is provided yet.
 
 `tests/test_stepping.c` plays random fights through the engine's AI callback,
 step by step, and through clones, and requires identical results. Pass a fight
 count and a first seed to run more: `test_stepping 5000 1`.
+
+### Builds
+
+`leekrl/build.h` draws random legal level 301 builds, reproducible from a 64-bit
+state, validates builds and converts them to generator entities. Capital costs
+mirror the game client's `costs.ts`. `leekrl_build_options` sets how specialized
+builds are and which characteristics receive capital.
+
+`leekrl/rules.h` lists the items excluded from 1v1 fights.
 
 ### Plants
 
