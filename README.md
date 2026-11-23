@@ -14,8 +14,9 @@ For an existing checkout, initialize it with:
 git submodule update --init --recursive
 ```
 
-The submodule tracks the `java-parity` branch for `git submodule update --remote`.
-Normal checkouts use the commit recorded by this repository.
+The submodule's `rl` branch holds the RL-only changes and starts from
+`java-parity`. Pure parity fixes belong on `java-parity`, then get merged into
+`rl`. Normal checkouts use the commit recorded by this repository.
 
 ## Build and test
 
@@ -69,7 +70,7 @@ resources, cooldowns, range, line of sight and applicable generator rules.
 Recompute after every action. `leekrl_action_execute` rechecks and executes
 the selected action; return from the generator's AI callback to end a turn.
 A valid cast need not hit an entity or have a useful effect. Summons require
-registered templates and currently have no AI callback.
+registered templates. They get an AI, so they play turns of their own.
 
 `leekrl_action_catalog_create` builds a fixed catalog from **all currently
 registered** weapons and chips: end turn, 840 movement destinations, then weapons
@@ -77,7 +78,8 @@ and chips ordered by item ID, with each item's offsets ordered by dy then dx.
 Register the complete intended item set before creating catalogs. Catalogs
 created from the same definitions have identical indices regardless of
 equipment. Unequipped items are masked. Adding or changing definitions changes
-the catalog and can invalidate saved models.
+the catalog and can invalidate saved models. Chips that only awakening plants
+own are left out, since plants are scripted.
 
 Movement slots cover all offsets with Manhattan distance 1 through 20.
 The mask requires a free destination and a traversable path no longer than
@@ -114,8 +116,10 @@ game's equipment model is not inherently limited to that number.
 ### Multi-action battle environment
 
 `leekrl/battle.h` provides a separate 1v1 environment against an idle
-opponent. Each step executes one legal movement or cast, or ends the turn.
-Movement and casts can be chained within one turn. Create two `LwEntityInfo`
+opponent. Each step executes one legal movement or cast, or ends the turn, for
+the learner's leek or one of its summons: observation and mask are those of the
+entity whose turn it is. Movement and casts can be chained within one turn.
+Create two `LwEntityInfo`
 builds, initialize `leekrl_battle_options`, then create a battle. Create the
 Gym wrapper with `leekrl_battle_observation_size`, the count from
 `leekrl_battle_catalog`, and `leekrl_battle_callbacks`. See
@@ -136,11 +140,22 @@ changing these values; no damage-based shaping is implemented. Turn-limit
 draws terminate; a configurable decision limit truncates with a valid final
 observation and mask for bootstrapping. Seeds use their low 31 bits.
 
-The generator runs a full synchronous fight, so the environment replays from
-the seed on every step. This is deterministic but expensive, especially for
-long episodes and large catalogs. Registries and item definitions must remain
-unchanged while contexts are in use. No concurrent generator use, opponent
+The fight stays suspended between steps, so a step only executes its own action
+(`lw_fight_step_*` in the submodule's `lw_fight.h`). Computing the mask over the
+whole catalog is the main remaining cost. Registries and item definitions must
+remain unchanged while contexts are in use. No concurrent generator use, opponent
 policy, self-play or automatic build randomization is provided yet.
+
+`tests/test_stepping.c` plays random fights through the engine's AI callback,
+step by step, and through clones, and requires identical results. Pass a fight
+count and a first seed to run more: `test_stepping 5000 1`.
+
+### Plants
+
+Awakening plants (corn, chilli pepper) act in the middle of other entities'
+actions. They are not controlled by the agent: `leekrl/plant_ai.h` documents
+the deterministic script they follow, for both sides. From the agent's point of
+view, what a plant does is part of the action that awakened it.
 
 ## Masked PPO
 

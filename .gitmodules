@@ -1,4 +1,4 @@
 [submodule "leekwars-generator-c"]
 	path = leekwars-generator-c
 	url = https://github.com/Bux42/leekwars-generator-c.git
-	branch = java-parity
+	branch = rl

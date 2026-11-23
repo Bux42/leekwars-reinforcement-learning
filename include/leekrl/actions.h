@@ -16,6 +16,9 @@ struct LwAttack;
 #define LEEKRL_MOVE_ACTION_COUNT \
     (2 * LEEKRL_MAX_MOVE_DISTANCE * (LEEKRL_MAX_MOVE_DISTANCE + 1))
 
+/* AI identifier of every summon created by leekrl_action_execute. */
+#define LEEKRL_SUMMON_AI_ID 1
+
 typedef enum {
     LEEKRL_ACTION_END_TURN,
     LEEKRL_ACTION_MOVE,
@@ -55,7 +58,9 @@ typedef struct leekrl_action_catalog leekrl_action_catalog;
  * Snapshot all currently registered weapons and chips into a stable layout:
  * end turn, 840 movement destinations, then weapons and chips sorted by ID
  * with their cast offsets in dy-then-dx order. Register the complete intended item
- * set before creating the catalog; the generator does not load it itself.
+ * set, summon templates included, before creating the catalog; the generator
+ * does not load it itself. Chips owned only by awakening plants are left out:
+ * plants are scripted (see plant_ai.h).
  * The registry and item definitions must remain unchanged during its use.
  */
 leekrl_action_status leekrl_action_catalog_create(leekrl_action_catalog **out);
@@ -98,8 +103,9 @@ leekrl_action_status leekrl_action_mask(struct LwFight *fight,
 /*
  * Revalidate and execute one action. engine_result receives the generator's
  * result (positive on success) or 0 for END_TURN. END_TURN only signals the
- * caller: return from the AI dispatch to actually finish the turn. Summons
- * have no AI callback. On ENGINE_ERROR consult lw_state_get_fatal_error().
+ * caller: end the turn to actually finish it. Summons get an AI and play turns
+ * of their own. Awakening plants need a plant AI dispatch set on the fight,
+ * else the engine reports a fatal error. On ENGINE_ERROR consult lw_state_get_fatal_error().
  */
 leekrl_action_status leekrl_action_execute(struct LwFight *fight,
                                            struct LwEntity *actor,

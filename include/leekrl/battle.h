@@ -37,16 +37,18 @@ enum {
 void leekrl_battle_options_init(leekrl_battle_options *options);
 
 /*
- * A replay-based 1v1 environment against an idle opponent. Copies both
- * entity definitions, including start effects. Register the complete intended
- * weapon/chip catalog and summon templates first; keep registries and their
- * definitions unchanged until destruction. Summoned entities have no AI.
+ * A 1v1 environment against an idle opponent. Copies both entity definitions,
+ * including start effects. Register the complete intended weapon/chip catalog
+ * and summon templates first; keep registries and their definitions unchanged
+ * until destruction.
  *
- * A decision is one movement, cast, or end turn; each step recomputes the
- * mask and grid. The fixed catalog is independent of equipped items. Steps
- * replay the fight from its seed and previous decisions; cost grows over time.
- * The decision limit truncates rather than ends the fight. Gym wrapper owns
- * neither the context nor its catalog. Destroy wrapper before context.
+ * A decision is one movement, cast, or end turn of the learner's leek or of one
+ * of its summons: observation and mask are those of the entity whose turn it
+ * is. Awakening plants are scripted (plant_ai.h), for both sides. The fight
+ * stays suspended between steps, so a step only executes its own action. The
+ * fixed catalog is independent of equipped items. The decision limit truncates
+ * rather than ends the fight. Gym wrapper owns neither the context nor its
+ * catalog. Destroy wrapper before context.
  */
 leekrl_env_status leekrl_battle_create(const LwEntityInfo *self,
                                        const LwEntityInfo *opponent,

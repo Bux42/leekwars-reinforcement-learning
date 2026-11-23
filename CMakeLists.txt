@@ -10,6 +10,7 @@ add_library(leekrl STATIC
     src/env.c
     src/grid.c
     src/leekwars.c
+    src/plant_ai.c
     src/ppo.c
 )
 target_include_directories(leekrl PUBLIC
@@ -61,6 +62,14 @@ if(BUILD_TESTING)
         add_executable(test_item_battle tests/test_item_battle.c)
         target_link_libraries(test_item_battle PRIVATE leekrl)
         add_test(NAME leekwars_item_battle COMMAND test_item_battle)
+
+        add_executable(test_stepping tests/test_stepping.c)
+        target_link_libraries(test_stepping PRIVATE leekrl)
+        add_test(NAME leekwars_stepping COMMAND test_stepping)
+
+        add_executable(test_plant_ai tests/test_plant_ai.c)
+        target_link_libraries(test_plant_ai PRIVATE leekrl)
+        add_test(NAME leekwars_plant_ai COMMAND test_plant_ai)
     endif()
 endif()
 

@@ -47,6 +47,37 @@ static int compare_items(const void *a, const void *b)
     return (x->id > y->id) - (x->id < y->id);
 }
 
+static int template_owns(const LwBulbTemplate *bulb, const LwChip *chip)
+{
+    int i, n = lw_bulb_template_get_chips_count(bulb);
+    for (i = 0; i < n; ++i)
+        if (lw_bulb_template_get_chip_at(bulb, i) == chip) return 1;
+    return 0;
+}
+
+/* Plants are scripted: chips owned by awakening plants and no other summon
+ * are not actions. Templates are found through the chips that summon them. */
+static int plant_only(const LwChip *chip, LwChip **chips, int count)
+{
+    int i, plant = 0;
+    for (i = 0; i < count; ++i) {
+        const LwEffectParameters *summon;
+        const LwBulbTemplate *bulb;
+        double id;
+        if (!chips[i]) continue;
+        summon = lw_attack_get_effect_parameters_by_type(lw_chip_get_attack(chips[i]),
+                                                         LW_EFFECT_TYPE_SUMMON);
+        if (!summon) continue;
+        id = lw_effect_parameters_get_value1(summon);
+        if (!isfinite(id) || id < INT_MIN || id > INT_MAX) continue;
+        bulb = lw_bulbs_get_invocation_template((int)id);
+        if (!bulb || !template_owns(bulb, chip)) continue;
+        if (bulb->awakening_zone <= 0) return 0;
+        plant = 1;
+    }
+    return plant;
+}
+
 leekrl_action_status leekrl_action_catalog_create(leekrl_action_catalog **out)
 {
     LwWeapon **weapons;
@@ -75,12 +106,14 @@ leekrl_action_status leekrl_action_catalog_create(leekrl_action_catalog **out)
         items[i].kind = LEEKRL_ACTION_WEAPON;
         items[i].attack = lw_weapon_get_attack(weapons[i]);
     }
+    n = (size_t)nw;
     for (i = 0; i < nc; ++i) {
-        size_t j = (size_t)nw + (size_t)i;
         if (!chips[i]) { status = LEEKRL_ACTION_ENGINE_ERROR; goto done; }
-        items[j].id = lw_chip_get_id(chips[i]);
-        items[j].kind = LEEKRL_ACTION_CHIP;
-        items[j].attack = lw_chip_get_attack(chips[i]);
+        if (plant_only(chips[i], chips, nc)) continue;
+        items[n].id = lw_chip_get_id(chips[i]);
+        items[n].kind = LEEKRL_ACTION_CHIP;
+        items[n].attack = lw_chip_get_attack(chips[i]);
+        ++n;
     }
     if (n) qsort(items, n, sizeof(*items), compare_items);
     for (offset = 0; offset < n; ++offset) {
@@ -393,7 +426,12 @@ leekrl_action_status leekrl_action_execute(LwFight *fight, LwEntity *actor,
         result = lw_state_use_weapon(state, actor, resolved.target);
         break;
     case LEEKRL_ACTION_CHIP:
-        result = lw_fight_use_chip(fight, actor, resolved.target, resolved.chip);
+        if (lw_attack_get_effect_parameters_by_type(lw_chip_get_attack(resolved.chip),
+                                                    LW_EFFECT_TYPE_SUMMON))
+            result = lw_fight_summon_entity_with_ai_id(fight, actor, resolved.target,
+                                                       resolved.chip, LEEKRL_SUMMON_AI_ID);
+        else
+            result = lw_fight_use_chip(fight, actor, resolved.target, resolved.chip);
         break;
     default:
         return LEEKRL_ACTION_INVALID_ARGUMENT;

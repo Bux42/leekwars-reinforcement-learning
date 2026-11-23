@@ -74,7 +74,7 @@ static void check_build(void)
     CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) == LEEKRL_ENV_OK);
     catalog = leekrl_battle_catalog(battle);
     n = leekrl_action_catalog_count(catalog);
-    CHECK(n == 31285);
+    CHECK(n == 31235); /* 50 plant chip actions left out */
     actions = leekrl_action_catalog_actions(catalog);
     CHECK(leekrl_env_create(leekrl_battle_observation_size(battle), n,
                             leekrl_battle_callbacks(), battle, &env) == LEEKRL_ENV_OK);
