@@ -106,6 +106,14 @@ leekrl_action_status leekrl_action_mask(struct LwFight *fight,
                                         size_t count, uint8_t *mask);
 
 /*
+ * Same result as leekrl_action_mask over the whole catalog, but only looks at
+ * reachable cells and at the actor's items. mask holds one byte per action.
+ */
+leekrl_action_status leekrl_action_catalog_mask(const leekrl_action_catalog *catalog,
+                                                struct LwFight *fight,
+                                                struct LwEntity *actor, uint8_t *mask);
+
+/*
  * Revalidate and execute one action. engine_result receives the generator's
  * result (positive on success) or 0 for END_TURN. END_TURN only signals the
  * caller: end the turn to actually finish it. Summons get an AI and play turns

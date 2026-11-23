@@ -27,6 +27,8 @@
 } } while (0)
 
 static int current_seed;
+static leekrl_action_catalog *catalog;
+static uint8_t *fast_mask, *slow_mask;
 
 typedef struct {
     uint64_t rng;
@@ -41,7 +43,7 @@ typedef struct {
 
 static struct {
     long fights, decisions, summon_decisions, awakenings, plant_casts, clones, draws;
-    long full_logs, dead_on_own_turn;
+    long full_logs, dead_on_own_turn, masks, legal;
 } stats;
 
 static uint64_t next_random(uint64_t *state)
@@ -50,6 +52,19 @@ static uint64_t next_random(uint64_t *state)
     z = (z ^ (z >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)) * UINT64_C(0x94D049BB133111EB);
     return z ^ (z >> 31);
+}
+
+/* The catalog mask must match checking every action one by one. */
+static void check_mask(LwFight *fight, LwEntity *actor)
+{
+    size_t i, n = leekrl_action_catalog_count(catalog);
+    memset(fast_mask, 7, n);
+    CHECK(leekrl_action_catalog_mask(catalog, fight, actor, fast_mask) == LEEKRL_ACTION_OK);
+    CHECK(leekrl_action_mask(fight, actor, leekrl_action_catalog_actions(catalog), n,
+                             slow_mask) == LEEKRL_ACTION_OK);
+    CHECK(!memcmp(fast_mask, slow_mask, n));
+    for (i = 0; i < n; ++i) stats.legal += fast_mask[i];
+    ++stats.masks;
 }
 
 /* Play one random legal action. Returns 0 to end the turn. */
@@ -333,6 +348,8 @@ static uint64_t play_steps(LwScenario *scenario, policy p, LwOutcome *outcome,
             if (!clone_rate) {
                 ++stats.decisions;
                 stats.summon_decisions += lw_entity_is_summon(actor);
+                if (!lw_entity_is_dead(actor) && stats.decisions % 40 == 0)
+                    check_mask(&s->fight, actor);
             }
             if (!act(&p, &s->fight, actor)) break;
             stats.dead_on_own_turn += !clone_rate && lw_entity_is_dead(actor);
@@ -396,8 +413,7 @@ static void random_build(LwEntityInfo *info, int id, uint64_t *rng)
 
 /* Keep movements, end turn excluded, and the items of these builds and of the
  * summons: random sampling then often finds a legal action. */
-static size_t filter_actions(const leekrl_action_catalog *catalog, const LwScenario *scenario,
-                             leekrl_action *out)
+static size_t filter_actions(const LwScenario *scenario, leekrl_action *out)
 {
     const leekrl_action *actions = leekrl_action_catalog_actions(catalog);
     size_t i, n = 0, count = leekrl_action_catalog_count(catalog);
@@ -423,7 +439,6 @@ int main(int argc, char **argv)
 {
     char error[512];
     int fights = argc > 1 ? atoi(argv[1]) : 200, first = argc > 2 ? atoi(argv[2]) : 1, i;
-    leekrl_action_catalog *catalog;
     leekrl_action *filtered;
     LwScenario *scenario = malloc(sizeof(*scenario));
     LwOutcome *outcome = malloc(sizeof(*outcome));
@@ -434,7 +449,9 @@ int main(int argc, char **argv)
     CHECK(scenario && outcome);
     CHECK(leekrl_action_catalog_create(&catalog) == LEEKRL_ACTION_OK);
     filtered = malloc(leekrl_action_catalog_count(catalog) * sizeof(*filtered));
-    CHECK(filtered);
+    fast_mask = malloc(leekrl_action_catalog_count(catalog));
+    slow_mask = malloc(leekrl_action_catalog_count(catalog));
+    CHECK(filtered && fast_mask && slow_mask);
     for (i = 0; i < fights; ++i) {
         LwEntityInfo info;
         policy p;
@@ -451,7 +468,7 @@ int main(int argc, char **argv)
         }
         p.rng = next_random(&rng);
         p.actions = filtered;
-        p.count = filter_actions(catalog, scenario, filtered);
+        p.count = filter_actions(scenario, filtered);
         expected = play_callback(scenario, p, outcome);
         CHECK(play_steps(scenario, p, outcome, 0) == expected);
         /* Early clones, then clones anywhere in the fight. */
@@ -461,11 +478,15 @@ int main(int argc, char **argv)
         ++stats.fights;
     }
     printf("%ld fights, %ld decisions (%ld by summons), %ld awakenings (%ld with casts), "
-           "%ld clones, %ld draws, %ld full logs, %ld deaths on own turn\n",
+           "%ld clones, %ld draws, %ld full logs, %ld deaths on own turn, "
+           "%ld masks (%ld legal actions)\n",
            stats.fights, stats.decisions, stats.summon_decisions, stats.awakenings,
            stats.plant_casts, stats.clones, stats.draws, stats.full_logs,
-           stats.dead_on_own_turn);
-    CHECK(stats.summon_decisions && stats.awakenings && stats.plant_casts && stats.clones);
+           stats.dead_on_own_turn, stats.masks, stats.legal);
+    CHECK(stats.summon_decisions && stats.awakenings && stats.plant_casts && stats.clones &&
+          stats.masks);
+    free(fast_mask);
+    free(slow_mask);
     free(filtered);
     free(outcome);
     free(scenario);

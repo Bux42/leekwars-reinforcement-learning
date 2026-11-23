@@ -9,8 +9,9 @@ extern "C" {
 
 /*
  * Item IDs a leek cannot equip in 1v1 fights: items of bosses and of their
- * fights, and items not supported yet. Weapons and chips share one ID space. Chips owned by plants are not
- * listed: the action catalog finds them in the summon templates.
+ * fights, and items not supported yet. Weapons and chips share one ID space.
+ * Chips owned by plants are not listed: the action catalog finds them in the
+ * summon templates.
  * Changing this list changes the 1v1 action indices.
  */
 extern const int leekrl_solo_excluded_items[];

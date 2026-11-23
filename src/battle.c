@@ -202,9 +202,8 @@ static int output(leekrl_battle *battle, float *observation, uint8_t *mask,
     *reward = 0;
     if (actor) {
         return observe(battle, actor, observation) ||
-               leekrl_action_mask(battle->fight, actor,
-                                  leekrl_action_catalog_actions(battle->catalog),
-                                  count, mask) != LEEKRL_ACTION_OK;
+               leekrl_action_catalog_mask(battle->catalog, battle->fight, actor,
+                                          mask) != LEEKRL_ACTION_OK;
     }
     actor = find_entity(battle->state, battle->scenario->entities[0][0].id);
     if (observe(battle, actor, observation)) return -1;

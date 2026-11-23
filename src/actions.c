@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "lw_attack.h"
 #include "lw_bulb_template.h"
@@ -29,16 +30,39 @@ typedef struct {
     int parent[LW_MAP_MAX_CELLS];
 } movement_routes;
 
-struct leekrl_action_catalog {
-    size_t count;
-    leekrl_action *actions;
-};
-
+/* An item and its actions: actions[first] to actions[first + count - 1]. */
 typedef struct {
     int id;
     leekrl_action_kind kind;
     LwAttack *attack;
+    size_t first;
+    size_t count;
 } catalog_item;
+
+struct leekrl_action_catalog {
+    size_t count;
+    leekrl_action *actions;
+    size_t item_count;
+    catalog_item *items; /* sorted by compare_items */
+    /* Action moving by (dx, dy), as move[dy + MAX][dx + MAX]. 0 for none. */
+    size_t move[2 * LEEKRL_MAX_MOVE_DISTANCE + 1][2 * LEEKRL_MAX_MOVE_DISTANCE + 1];
+};
+
+/* Target-independent part of casting an item. */
+typedef struct {
+    LwWeapon *weapon;
+    LwChip *chip;
+    LwAttack *attack;
+    const LwEffectParameters *summon;
+    int team;
+    int teleports;
+    int checks_density;
+} castable;
+
+/* Line of sight from one cell, computed on demand: -1 unknown, 0 or 1. */
+typedef struct {
+    signed char visible[LW_MAP_MAX_CELLS];
+} sight_cache;
 
 static int compare_items(const void *a, const void *b)
 {
@@ -171,8 +195,18 @@ leekrl_action_status leekrl_action_catalog_create_without(const int *excluded,
                                            items[offset].id, catalog->actions + count,
                                            catalog->count - count, &slots);
         if (status != LEEKRL_ACTION_OK) goto done;
+        items[offset].first = count;
+        items[offset].count = slots;
         count += slots;
     }
+    for (offset = 1; offset <= LEEKRL_MOVE_ACTION_COUNT; ++offset) {
+        const leekrl_action *move = &catalog->actions[offset];
+        catalog->move[move->dy + LEEKRL_MAX_MOVE_DISTANCE]
+                     [move->dx + LEEKRL_MAX_MOVE_DISTANCE] = offset;
+    }
+    catalog->items = items;
+    catalog->item_count = n;
+    items = NULL;
     *out = catalog;
     catalog = NULL;
 done:
@@ -185,6 +219,7 @@ void leekrl_action_catalog_destroy(leekrl_action_catalog *catalog)
 {
     if (!catalog) return;
     free(catalog->actions);
+    free(catalog->items);
     free(catalog);
 }
 
@@ -296,34 +331,139 @@ static int build_movement_routes(LwMap *map, LwEntity *actor, movement_routes *r
     return 1;
 }
 
+static leekrl_action_status check_actor(LwFight *fight, LwEntity *actor)
+{
+    LwState *state = lw_fight_get_state(fight);
+    if (!state || !lw_state_get_map(state) || !lw_entity_get_cell(actor) ||
+        !lw_state_can_act(state, actor)) return LEEKRL_ACTION_INVALID_STATE;
+    return lw_state_get_fatal_error(state) ? LEEKRL_ACTION_ENGINE_ERROR : LEEKRL_ACTION_OK;
+}
+
+static leekrl_action_status check_item(LwState *state, LwEntity *actor,
+                                       leekrl_action_kind kind, int item_id,
+                                       castable *item)
+{
+    int i, equip, uses;
+    item->weapon = NULL;
+    item->chip = NULL;
+    item->attack = NULL;
+    item->summon = NULL;
+    item->team = lw_entity_get_team(actor);
+    item->teleports = 0;
+    item->checks_density = 0;
+    if (kind == LEEKRL_ACTION_WEAPON) {
+        for (i = 0; i < lw_entity_get_weapons_count(actor); ++i) {
+            LwWeapon *weapon = lw_entity_get_weapon_at(actor, i);
+            if (weapon && lw_weapon_get_id(weapon) == item_id) {
+                item->weapon = weapon;
+                break;
+            }
+        }
+        if (!item->weapon || lw_entity_has_state(actor, LW_ENTITY_STATE_AMPUTATED))
+            return LEEKRL_ACTION_ILLEGAL;
+        equip = lw_entity_get_weapon(actor) != item->weapon;
+        if ((equip && lw_entity_get_tp(actor) <= 0) ||
+            (int64_t)lw_entity_get_tp(actor) - equip < lw_weapon_get_cost(item->weapon))
+            return LEEKRL_ACTION_ILLEGAL;
+        item->attack = lw_weapon_get_attack(item->weapon);
+        if (!item->attack) return LEEKRL_ACTION_ENGINE_ERROR;
+    } else {
+        item->chip = lw_entity_get_chip(actor, item_id);
+        if (!item->chip) return LEEKRL_ACTION_ILLEGAL;
+        item->attack = lw_chip_get_attack(item->chip);
+        if (!item->attack) return LEEKRL_ACTION_ENGINE_ERROR;
+        item->summon = lw_attack_get_effect_parameters_by_type(item->attack,
+                                                               LW_EFFECT_TYPE_SUMMON);
+        if ((item->summon || lw_chip_is_team_cooldown(item->chip)) &&
+            (item->team < 0 || item->team >= state->n_teams || !state->teams[item->team]))
+            return LEEKRL_ACTION_ENGINE_ERROR;
+        if (((item->summon || lw_chip_get_cost(item->chip) > 0) &&
+             lw_chip_get_cost(item->chip) > lw_entity_get_tp(actor)) ||
+            lw_state_has_cooldown(state, actor, item->chip))
+            return LEEKRL_ACTION_ILLEGAL;
+        if (item->summon)
+            return lw_entity_has_state(actor, LW_ENTITY_STATE_STERILE) ||
+                   lw_team_get_summon_count(state->teams[item->team]) >= LW_SUMMON_LIMIT
+                ? LEEKRL_ACTION_ILLEGAL : LEEKRL_ACTION_OK;
+        item->teleports = lw_attack_get_effect_parameters_by_type(
+            item->attack, LW_EFFECT_TYPE_TELEPORT) != NULL;
+        item->checks_density = item->teleports || lw_attack_get_effect_parameters_by_type(
+            item->attack, LW_EFFECT_TYPE_PERMUTATION) != NULL;
+    }
+    uses = lw_attack_get_max_uses(item->attack);
+    return uses != -1 && lw_entity_get_item_uses(actor, item_id) >= uses
+        ? LEEKRL_ACTION_ILLEGAL : LEEKRL_ACTION_OK;
+}
+
+/* sight may be NULL. Otherwise it must belong to this map state and cell. */
+static int can_reach(LwMap *map, LwCell *from, LwCell *target, const LwAttack *attack,
+                     sight_cache *sight)
+{
+    signed char *visible;
+    if (!lw_map_verify_range(map, from, target, attack)) return 0;
+    /* First-in-line attacks ignore one entity: their sight is not shared. */
+    if (!sight || !lw_attack_need_los(attack) ||
+        lw_attack_get_area_id(attack) == LW_AREA_TYPE_FIRST_IN_LINE)
+        return lw_map_verify_los(map, from, target, attack);
+    visible = &sight->visible[lw_cell_get_id(target)];
+    if (*visible < 0) *visible = (signed char)(lw_map_verify_los(map, from, target, attack) != 0);
+    return *visible;
+}
+
+static leekrl_action_status check_target(LwState *state, LwEntity *actor, const castable *item,
+                                         LwCell *target, sight_cache *sight)
+{
+    LwMap *map = lw_state_get_map(state);
+    LwCell *from = lw_entity_get_cell(actor);
+    if (item->summon) {
+        double template_id = lw_effect_parameters_get_value1(item->summon);
+        if (!lw_cell_available(target, map) ||
+            !can_reach(map, from, target, item->attack, sight)) return LEEKRL_ACTION_ILLEGAL;
+        return !isfinite(template_id) || template_id < INT_MIN || template_id > INT_MAX ||
+               !lw_bulbs_get_invocation_template((int)template_id) ||
+               state->n_entities >= LW_STATE_MAX_ENTITIES ||
+               state->teams[item->team]->n_entities >= LW_TEAM_MAX_ENTITIES ||
+               state->order.n_leeks >= LW_ORDER_MAX_ENTITIES
+            ? LEEKRL_ACTION_ENGINE_ERROR : LEEKRL_ACTION_OK;
+    }
+    if (item->chip &&
+        (!lw_cell_is_walkable(target) ||
+         (item->teleports && !lw_cell_available(target, map)) ||
+         (item->checks_density &&
+          lw_attack_blocked_by_density(item->attack, actor, lw_cell_get_player(target, map)))))
+        return LEEKRL_ACTION_ILLEGAL;
+    return can_reach(map, from, target, item->attack, sight)
+        ? LEEKRL_ACTION_OK : LEEKRL_ACTION_ILLEGAL;
+}
+
+static LwCell *cell_offset(LwMap *map, LwCell *from, int dx, int dy)
+{
+    int64_t x = (int64_t)lw_cell_get_x(from) + dx;
+    int64_t y = (int64_t)lw_cell_get_y(from) + dy;
+    if (x < map->min_x || x > map->max_x || y < map->min_y || y > map->max_y) return NULL;
+    return lw_map_get_cell_xy(map, (int)x, (int)y);
+}
+
 static leekrl_action_status resolve(LwFight *fight, LwEntity *actor,
                                     const leekrl_action *action,
                                     resolved_action *resolved, movement_routes *routes)
 {
     LwState *state;
     LwMap *map;
-    LwCell *from;
-    LwAttack *attack;
-    int64_t x, y;
-    int uses;
+    castable item;
+    leekrl_action_status status;
     if (!fight || !actor || !resolved || !valid_descriptor(action))
         return LEEKRL_ACTION_INVALID_ARGUMENT;
-    state = lw_fight_get_state(fight);
-    if (!state || !lw_state_get_map(state) || !lw_entity_get_cell(actor) ||
-        !lw_state_can_act(state, actor)) return LEEKRL_ACTION_INVALID_STATE;
-    if (lw_state_get_fatal_error(state)) return LEEKRL_ACTION_ENGINE_ERROR;
+    status = check_actor(fight, actor);
+    if (status != LEEKRL_ACTION_OK) return status;
     resolved->target = NULL;
     resolved->weapon = NULL;
     resolved->chip = NULL;
     if (action->kind == LEEKRL_ACTION_END_TURN) return LEEKRL_ACTION_OK;
 
+    state = lw_fight_get_state(fight);
     map = lw_state_get_map(state);
-    from = lw_entity_get_cell(actor);
-    x = (int64_t)lw_cell_get_x(from) + action->dx;
-    y = (int64_t)lw_cell_get_y(from) + action->dy;
-    if (x < map->min_x || x > map->max_x || y < map->min_y || y > map->max_y)
-        return LEEKRL_ACTION_ILLEGAL;
-    resolved->target = lw_map_get_cell_xy(map, (int)x, (int)y);
+    resolved->target = cell_offset(map, lw_entity_get_cell(actor), action->dx, action->dy);
     if (!resolved->target) return LEEKRL_ACTION_ILLEGAL;
     if (action->kind == LEEKRL_ACTION_MOVE) {
         int id = lw_cell_get_id(resolved->target), i;
@@ -338,65 +478,88 @@ static leekrl_action_status resolve(LwFight *fight, LwEntity *actor,
         }
         return LEEKRL_ACTION_OK;
     }
-    if (action->kind == LEEKRL_ACTION_WEAPON) {
-        int i, equip;
-        for (i = 0; i < lw_entity_get_weapons_count(actor); ++i) {
-            LwWeapon *weapon = lw_entity_get_weapon_at(actor, i);
-            if (weapon && lw_weapon_get_id(weapon) == action->item_id) {
-                resolved->weapon = weapon;
-                break;
-            }
-        }
-        if (!resolved->weapon || lw_entity_has_state(actor, LW_ENTITY_STATE_AMPUTATED))
-            return LEEKRL_ACTION_ILLEGAL;
-        equip = lw_entity_get_weapon(actor) != resolved->weapon;
-        if ((equip && lw_entity_get_tp(actor) <= 0) ||
-            (int64_t)lw_entity_get_tp(actor) - equip < lw_weapon_get_cost(resolved->weapon))
-            return LEEKRL_ACTION_ILLEGAL;
-        attack = lw_weapon_get_attack(resolved->weapon);
-    } else {
-        const LwEffectParameters *summon;
-        int team;
-        resolved->chip = lw_entity_get_chip(actor, action->item_id);
-        if (!resolved->chip) return LEEKRL_ACTION_ILLEGAL;
-        attack = lw_chip_get_attack(resolved->chip);
-        if (!attack) return LEEKRL_ACTION_ENGINE_ERROR;
-        summon = lw_attack_get_effect_parameters_by_type(attack, LW_EFFECT_TYPE_SUMMON);
-        team = lw_entity_get_team(actor);
-        if ((summon || lw_chip_is_team_cooldown(resolved->chip)) &&
-            (team < 0 || team >= state->n_teams || !state->teams[team]))
-            return LEEKRL_ACTION_ENGINE_ERROR;
-        if (((summon || lw_chip_get_cost(resolved->chip) > 0) &&
-             lw_chip_get_cost(resolved->chip) > lw_entity_get_tp(actor)) ||
-            lw_state_has_cooldown(state, actor, resolved->chip))
-            return LEEKRL_ACTION_ILLEGAL;
-        if (summon) {
-            double template_id = lw_effect_parameters_get_value1(summon);
-            if (!lw_cell_available(resolved->target, map) ||
-                lw_entity_has_state(actor, LW_ENTITY_STATE_STERILE) ||
-                !lw_map_can_use_attack(map, from, resolved->target, attack))
-                return LEEKRL_ACTION_ILLEGAL;
-            if (lw_team_get_summon_count(state->teams[team]) >= LW_SUMMON_LIMIT)
-                return LEEKRL_ACTION_ILLEGAL;
-            if (!isfinite(template_id) || template_id < INT_MIN || template_id > INT_MAX ||
-                !lw_bulbs_get_invocation_template((int)template_id) ||
-                state->n_entities >= LW_STATE_MAX_ENTITIES ||
-                state->teams[team]->n_entities >= LW_TEAM_MAX_ENTITIES ||
-                state->order.n_leeks >= LW_ORDER_MAX_ENTITIES)
-                return LEEKRL_ACTION_ENGINE_ERROR;
-            return LEEKRL_ACTION_OK;
-        }
-        if (!lw_cell_is_walkable(resolved->target) ||
-            (lw_attack_get_effect_parameters_by_type(attack, LW_EFFECT_TYPE_TELEPORT) &&
-             !lw_cell_available(resolved->target, map)) ||
-            lw_attack_blocked_by_density(attack, actor, lw_cell_get_player(resolved->target, map)))
-            return LEEKRL_ACTION_ILLEGAL;
+    status = check_item(state, actor, action->kind, action->item_id, &item);
+    if (status != LEEKRL_ACTION_OK) return status;
+    resolved->weapon = item.weapon;
+    resolved->chip = item.chip;
+    return check_target(state, actor, &item, resolved->target, NULL);
+}
+
+static const catalog_item *find_item(const leekrl_action_catalog *catalog,
+                                     leekrl_action_kind kind, int id)
+{
+    catalog_item key = {0};
+    key.id = id;
+    key.kind = kind;
+    return catalog->item_count ? bsearch(&key, catalog->items, catalog->item_count,
+                                         sizeof(key), compare_items) : NULL;
+}
+
+static leekrl_action_status mask_item(const leekrl_action_catalog *catalog, LwState *state,
+                                      LwEntity *actor, leekrl_action_kind kind, int id,
+                                      sight_cache *sight, uint8_t *mask)
+{
+    const catalog_item *entry = find_item(catalog, kind, id);
+    LwMap *map = lw_state_get_map(state);
+    LwCell *from = lw_entity_get_cell(actor);
+    leekrl_action_status status;
+    castable item;
+    size_t i;
+    if (!entry) return LEEKRL_ACTION_OK;
+    status = check_item(state, actor, kind, id, &item);
+    if (status == LEEKRL_ACTION_ILLEGAL) return LEEKRL_ACTION_OK;
+    if (status != LEEKRL_ACTION_OK) return status;
+    for (i = entry->first; i < entry->first + entry->count; ++i) {
+        LwCell *target = cell_offset(map, from, catalog->actions[i].dx, catalog->actions[i].dy);
+        if (!target) continue;
+        status = check_target(state, actor, &item, target, sight);
+        if (status == LEEKRL_ACTION_OK) mask[i] = 1;
+        else if (status != LEEKRL_ACTION_ILLEGAL) return status;
     }
-    if (!attack) return LEEKRL_ACTION_ENGINE_ERROR;
-    uses = lw_attack_get_max_uses(attack);
-    if ((uses != -1 && lw_entity_get_item_uses(actor, action->item_id) >= uses) ||
-        !lw_map_can_use_attack(map, from, resolved->target, attack))
-        return LEEKRL_ACTION_ILLEGAL;
+    return LEEKRL_ACTION_OK;
+}
+
+leekrl_action_status leekrl_action_catalog_mask(const leekrl_action_catalog *catalog,
+                                                LwFight *fight, LwEntity *actor,
+                                                uint8_t *mask)
+{
+    LwState *state;
+    LwMap *map;
+    LwCell *from;
+    movement_routes routes = {0};
+    sight_cache sight;
+    leekrl_action_status status;
+    int i;
+    if (!catalog || !fight || !actor || !mask) return LEEKRL_ACTION_INVALID_ARGUMENT;
+    status = check_actor(fight, actor);
+    if (status != LEEKRL_ACTION_OK) return status;
+    state = lw_fight_get_state(fight);
+    map = lw_state_get_map(state);
+    from = lw_entity_get_cell(actor);
+    memset(mask, 0, catalog->count);
+    mask[0] = 1;
+    if (!build_movement_routes(map, actor, &routes)) return LEEKRL_ACTION_ENGINE_ERROR;
+    for (i = 0; i < map->nb_cells; ++i) {
+        const LwCell *cell = &map->cells[i];
+        if (routes.distance[i] <= 0) continue;
+        mask[catalog->move[cell->y - from->y + LEEKRL_MAX_MOVE_DISTANCE]
+                          [cell->x - from->x + LEEKRL_MAX_MOVE_DISTANCE]] = 1;
+    }
+    memset(sight.visible, -1, sizeof(sight.visible));
+    for (i = 0; i < lw_entity_get_weapons_count(actor); ++i) {
+        LwWeapon *weapon = lw_entity_get_weapon_at(actor, i);
+        if (!weapon) continue;
+        status = mask_item(catalog, state, actor, LEEKRL_ACTION_WEAPON,
+                           lw_weapon_get_id(weapon), &sight, mask);
+        if (status != LEEKRL_ACTION_OK) return status;
+    }
+    for (i = 0; i < lw_entity_get_chips_count(actor); ++i) {
+        LwChip *chip = lw_entity_get_chip_at(actor, i);
+        if (!chip) continue;
+        status = mask_item(catalog, state, actor, LEEKRL_ACTION_CHIP,
+                           lw_chip_get_id(chip), &sight, mask);
+        if (status != LEEKRL_ACTION_OK) return status;
+    }
     return LEEKRL_ACTION_OK;
 }
 
