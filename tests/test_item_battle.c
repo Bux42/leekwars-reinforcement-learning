@@ -3,6 +3,7 @@
 #include "leekrl/collect.h"
 #include "leekrl/grid.h"
 #include "leekrl/item_snapshot.h"
+#include "leekrl/rules.h"
 #include "lw_bulb_template.h"
 #include "lw_chip.h"
 #include "lw_weapon.h"
@@ -50,6 +51,45 @@ static void check_registered_items(void)
     CHECK(lw_bulbs_get_invocation_template(13));
 }
 
+/* The 1v1 catalog holds every item but the excluded ones and plant chips. */
+static void check_catalog_items(const leekrl_action_catalog *catalog)
+{
+    const leekrl_action *actions = leekrl_action_catalog_actions(catalog);
+    size_t i, n = leekrl_action_catalog_count(catalog);
+    int weapons = 0, chips = 0;
+    for (i = 0; i < leekrl_solo_excluded_count; ++i)
+        CHECK(!!lw_weapons_get_weapon(leekrl_solo_excluded_items[i]) !=
+              !!lw_chips_get_chip(leekrl_solo_excluded_items[i]));
+    for (i = 0; i < n; ++i) {
+        int id = actions[i].item_id;
+        CHECK(!leekrl_solo_item_excluded(id) && (id < 444 || id > 447));
+        if (i && actions[i - 1].item_id == id) continue;
+        weapons += actions[i].kind == LEEKRL_ACTION_WEAPON;
+        chips += actions[i].kind == LEEKRL_ACTION_CHIP;
+    }
+    printf("1v1 catalog: %zu actions, %d weapons, %d chips\n", n, weapons, chips);
+    CHECK(weapons == 37 && chips == 105);
+}
+
+static void check_excluded_builds(void)
+{
+    LwEntityInfo self, opponent;
+    leekrl_battle_options options;
+    leekrl_battle *battle = NULL;
+    init_entity(&self, 1);
+    init_entity(&opponent, 2);
+    leekrl_battle_options_init(&options);
+    self.weapons[0] = 410;
+    self.n_weapons = 1;
+    CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) ==
+          LEEKRL_ENV_INVALID_ARGUMENT && !battle);
+    self.n_weapons = 0;
+    self.chips[0] = 414;
+    self.n_chips = 1;
+    CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) ==
+          LEEKRL_ENV_INVALID_ARGUMENT && !battle);
+}
+
 static void check_build(void)
 {
     LwEntityInfo self, opponent;
@@ -74,7 +114,7 @@ static void check_build(void)
     CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) == LEEKRL_ENV_OK);
     catalog = leekrl_battle_catalog(battle);
     n = leekrl_action_catalog_count(catalog);
-    CHECK(n == 31235); /* 50 plant chip actions left out */
+    check_catalog_items(catalog);
     actions = leekrl_action_catalog_actions(catalog);
     CHECK(leekrl_env_create(leekrl_battle_observation_size(battle), n,
                             leekrl_battle_callbacks(), battle, &env) == LEEKRL_ENV_OK);
@@ -190,6 +230,7 @@ int main(void)
     CHECK(leekrl_item_snapshot_register(error, sizeof(error)));
     check_registered_items();
     check_build();
+    check_excluded_builds();
     check_summon();
     leekrl_item_snapshot_clear();
     CHECK(!lw_weapons_get_weapon(108));

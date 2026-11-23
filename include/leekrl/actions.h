@@ -64,6 +64,11 @@ typedef struct leekrl_action_catalog leekrl_action_catalog;
  * The registry and item definitions must remain unchanged during its use.
  */
 leekrl_action_status leekrl_action_catalog_create(leekrl_action_catalog **out);
+
+/* Same, leaving out some items, for example those of rules.h. */
+leekrl_action_status leekrl_action_catalog_create_without(const int *excluded,
+                                                          size_t excluded_count,
+                                                          leekrl_action_catalog **out);
 void leekrl_action_catalog_destroy(leekrl_action_catalog *catalog);
 size_t leekrl_action_catalog_count(const leekrl_action_catalog *catalog);
 const leekrl_action *leekrl_action_catalog_actions(const leekrl_action_catalog *catalog);

@@ -78,7 +78,22 @@ static int plant_only(const LwChip *chip, LwChip **chips, int count)
     return plant;
 }
 
+static int excluded_item(const int *excluded, size_t count, int id)
+{
+    size_t i;
+    for (i = 0; i < count; ++i)
+        if (excluded[i] == id) return 1;
+    return 0;
+}
+
 leekrl_action_status leekrl_action_catalog_create(leekrl_action_catalog **out)
+{
+    return leekrl_action_catalog_create_without(NULL, 0, out);
+}
+
+leekrl_action_status leekrl_action_catalog_create_without(const int *excluded,
+                                                          size_t excluded_count,
+                                                          leekrl_action_catalog **out)
 {
     LwWeapon **weapons;
     LwChip **chips;
@@ -90,6 +105,7 @@ leekrl_action_status leekrl_action_catalog_create(leekrl_action_catalog **out)
     int dx, dy;
     if (!out) return LEEKRL_ACTION_INVALID_ARGUMENT;
     *out = NULL;
+    if (!excluded && excluded_count) return LEEKRL_ACTION_INVALID_ARGUMENT;
     weapons = lw_weapons_get_templates(&nw);
     chips = lw_chips_get_templates(&nc);
     if (nw < 0 || nc < 0 || (nw && !weapons) || (nc && !chips))
@@ -100,16 +116,19 @@ leekrl_action_status leekrl_action_catalog_create(leekrl_action_catalog **out)
         items = malloc(n * sizeof(*items));
         if (!items) return LEEKRL_ACTION_OUT_OF_MEMORY;
     }
+    n = 0;
     for (i = 0; i < nw; ++i) {
         if (!weapons[i]) { status = LEEKRL_ACTION_ENGINE_ERROR; goto done; }
-        items[i].id = lw_weapon_get_id(weapons[i]);
-        items[i].kind = LEEKRL_ACTION_WEAPON;
-        items[i].attack = lw_weapon_get_attack(weapons[i]);
+        if (excluded_item(excluded, excluded_count, lw_weapon_get_id(weapons[i]))) continue;
+        items[n].id = lw_weapon_get_id(weapons[i]);
+        items[n].kind = LEEKRL_ACTION_WEAPON;
+        items[n].attack = lw_weapon_get_attack(weapons[i]);
+        ++n;
     }
-    n = (size_t)nw;
     for (i = 0; i < nc; ++i) {
         if (!chips[i]) { status = LEEKRL_ACTION_ENGINE_ERROR; goto done; }
-        if (plant_only(chips[i], chips, nc)) continue;
+        if (plant_only(chips[i], chips, nc) ||
+            excluded_item(excluded, excluded_count, lw_chip_get_id(chips[i]))) continue;
         items[n].id = lw_chip_get_id(chips[i]);
         items[n].kind = LEEKRL_ACTION_CHIP;
         items[n].attack = lw_chip_get_attack(chips[i]);

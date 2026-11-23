@@ -42,6 +42,8 @@ void leekrl_battle_options_init(leekrl_battle_options *options);
  * and summon templates first; keep registries and their definitions unchanged
  * until destruction.
  *
+ * Items of rules.h are not actions, and builds equipping one are rejected.
+ *
  * A decision is one movement, cast, or end turn of the learner's leek or of one
  * of its summons: observation and mask are those of the entity whose turn it
  * is. Awakening plants are scripted (plant_ai.h), for both sides. The fight

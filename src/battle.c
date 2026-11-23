@@ -1,6 +1,7 @@
 #include "leekrl/battle.h"
 #include "leekrl/grid.h"
 #include "leekrl/plant_ai.h"
+#include "leekrl/rules.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -46,12 +47,14 @@ static int valid_info(const LwEntityInfo *info)
         info->n_start_effects < 0 ||
         (info->n_start_effects && !info->start_effects)) return 0;
     for (i = 0; i < info->n_weapons; ++i) {
-        if (!lw_weapons_get_weapon(info->weapons[i])) return 0;
+        if (!lw_weapons_get_weapon(info->weapons[i]) ||
+            leekrl_solo_item_excluded(info->weapons[i])) return 0;
         for (j = 0; j < i; ++j)
             if (info->weapons[i] == info->weapons[j]) return 0;
     }
     for (i = 0; i < info->n_chips; ++i) {
-        if (!lw_chips_get_chip(info->chips[i])) return 0;
+        if (!lw_chips_get_chip(info->chips[i]) ||
+            leekrl_solo_item_excluded(info->chips[i])) return 0;
         for (j = 0; j < i; ++j)
             if (info->chips[i] == info->chips[j]) return 0;
     }
@@ -102,7 +105,9 @@ leekrl_env_status leekrl_battle_create(const LwEntityInfo *self,
         leekrl_battle_destroy(battle);
         return LEEKRL_ENV_OUT_OF_MEMORY;
     }
-    status = leekrl_action_catalog_create(&battle->catalog);
+    status = leekrl_action_catalog_create_without(leekrl_solo_excluded_items,
+                                                  leekrl_solo_excluded_count,
+                                                  &battle->catalog);
     if (status != LEEKRL_ACTION_OK) {
         leekrl_battle_destroy(battle);
         return status == LEEKRL_ACTION_OUT_OF_MEMORY ? LEEKRL_ENV_OUT_OF_MEMORY :

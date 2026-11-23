@@ -12,6 +12,7 @@ add_library(leekrl STATIC
     src/leekwars.c
     src/plant_ai.c
     src/ppo.c
+    src/rules.c
 )
 target_include_directories(leekrl PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
