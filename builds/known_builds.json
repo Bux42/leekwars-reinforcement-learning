@@ -1,0 +1,55 @@
+{
+  "builds": [
+    {
+      "name": "capitaine_mamene_strenght",
+      "weight": 1.0,
+      "characteristics": {
+        "life": 1330,
+        "magic": 50,
+        "strength": 620,
+        "frequency": 225,
+        "wisdom": 120,
+        "cores": 9,
+        "agility": 540,
+        "ram": 20,
+        "resistance": 90,
+        "mp": 6,
+        "science": 630,
+        "tp": 29
+      },
+      "components": [
+        "nuclear_core",
+        "motherboard3",
+        "ram3",
+        "power_supply",
+        "blue_plum",
+        "neural_core_pro",
+        "chestnut",
+        "thokozani"
+      ],
+      "weapons": ["rhino", "katana", "heavy_sword", "revoked_m_laser"],
+      "chips": [
+        "flash",
+        "lightning",
+        "regeneration",
+        "thorn",
+        "mirror",
+        "bramble",
+        "protein",
+        "motivation",
+        "stretching",
+        "prism",
+        "steroid",
+        "adrenaline",
+        "reflexes",
+        "seven_league_boots",
+        "doping",
+        "rage",
+        "liberation",
+        "jump",
+        "inversion",
+        "teleportation"
+      ]
+    }
+  ]
+}
