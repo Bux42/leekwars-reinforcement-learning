@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Random builds</title>
+<style>
+:root {
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+  --line: #e1e0d9; --bar: #2a78d6; --weak: #efeee9;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+    --line: #2c2c2a; --bar: #3987e5; --weak: #262624;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.4 system-ui, sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 24px 0 8px; }
+h3 { font-size: 14px; margin: 0; }
+p { margin: 0 0 8px; color: var(--ink2); max-width: 80ch; }
+button, select { font: inherit; color: inherit; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--bar); }
+.row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 12px; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+.cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); }
+section { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+svg text { fill: var(--ink2); font-size: 11px; }
+.small { color: var(--ink2); font-size: 12px; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px 12px; margin: 8px 0; font-size: 13px; }
+.stats div { display: flex; justify-content: space-between; border-bottom: 1px solid var(--weak); }
+.stats span { color: var(--ink2); }
+.stats b { font-variant-numeric: tabular-nums; }
+.list { font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+.list span { color: var(--ink2); }
+#tip { position: fixed; pointer-events: none; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 8px; font-size: 12px; display: none; z-index: 2; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Random builds</h1>
+  <p id="intro"></p>
+  <h2>Distributions</h2>
+  <p>Final values, components included. <span id="marker"></span></p>
+  <div class="grid" id="charts"></div>
+  <h2>Builds</h2>
+  <p>In the order they were drawn, unless sorted. "Best turn" is an estimate of the most
+    damage and poison one turn can do: everything in reach, no shield, critical hit, bonus
+    or cooldown. Poison counts for its whole duration. Taking each weapon costs 1 TP.</p>
+  <div class="row">
+    <label>Sort <select id="sort"></select></label>
+    <button id="prev">◀ Previous</button><button id="next">Next ▶</button>
+    <span class="small" id="where"></span>
+  </div>
+  <div class="cards" id="cards"></div>
+</main>
+<div id="tip"></div>
+<script>
+const DATA = /*DATA*/null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const nice = s => esc(s.replace(/_/g, " "));
+const builds = DATA.builds.map((b, i) => ({...b, number: i + 1}));
+const known = DATA.known[0];
+const measures = [...DATA.stats.map(s => [s === "tp" || s === "mp" || s === "ram" ? s.toUpperCase() : s, b => b.stats[s]]),
+  ["chips equipped", b => b.chips.length], ["best turn", b => b.damage]];
+const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+
+$("intro").textContent = `${builds.length} builds drawn by the same code as training fights (seed ${DATA.seed}).`;
+$("marker").textContent = known ? `The dashed line is the known build ${known.name}.` : "";
+
+function chart(name, get) {
+  const values = builds.map(get).sort((a, b) => a - b);
+  // The last bar holds everything above, so that a few extremes do not flatten the rest.
+  const low = values[0], top = quantile(values, 0.99);
+  const extra = known ? get(known) : low;
+  const high = Math.max(top, extra, low + 1);
+  const whole = high - low < 24;
+  const step = whole ? 1 : (high - low) / 24, count = whole ? Math.floor(high - low) + 1 : 24;
+  const bins = new Array(count).fill(0);
+  for (const v of values) bins[Math.min(count - 1, Math.max(0, Math.floor((v - low) / step)))]++;
+  const W = 260, H = 90, w = W / count, most = Math.max(...bins);
+  let bars = "", hits = "";
+  bins.forEach((n, i) => {
+    const h = n / most * H, x = i * w;
+    const from = Math.round(low + i * step), to = whole ? from : Math.round(low + (i + 1) * step) - 1;
+    const range = i === count - 1 ? `${from} and more` : to > from ? `${from} to ${to}` : `${from}`;
+    const r = Math.min(4, h, (w - 2) / 2);
+    bars += n ? `<path fill="var(--bar)" d="M${x + 1},${H}v${r - h}q0,${-r} ${r},${-r}h${w - 2 - 2 * r}q${r},0 ${r},${r}v${h - r}z"/>` : "";
+    hits += `<rect x="${x}" y="0" width="${w}" height="${H}" fill="transparent" data-tip="${range}: ${n} builds (${(100 * n / builds.length).toFixed(1)}%)"/>`;
+  });
+  const at = v => whole ? (v - low + 0.5) * w : Math.min(W, (v - low) / step * w);
+  const line = known ? `<line x1="${at(extra)}" x2="${at(extra)}" y1="-4" y2="${H}" stroke="var(--ink)" stroke-dasharray="3 3"/>` : "";
+  return `<section><h3>${esc(name)}</h3><div class="small">median ${quantile(values, 0.5)}, 80% between ${quantile(values, 0.1)} and ${quantile(values, 0.9)}${known ? `, known ${extra}` : ""}</div>
+    <svg viewBox="0 -6 ${W} ${H + 22}" role="img" aria-label="Distribution of ${esc(name)}">${bars}${line}
+    <line x1="0" x2="${W}" y1="${H}" y2="${H}" stroke="var(--line)"/>${hits}
+    <text x="0" y="${H + 14}">${Math.round(low)}</text><text x="${W}" y="${H + 14}" text-anchor="end">${Math.round(high)}${values[values.length - 1] > high ? "+" : ""}</text></svg></section>`;
+}
+$("charts").innerHTML = measures.map(m => chart(...m)).join("");
+
+$("sort").innerHTML = `<option value="">as drawn</option>` + measures.map(([name], i) =>
+  `<option value="${i},-1">${esc(name)}, highest first</option><option value="${i},1">${esc(name)}, lowest first</option>`).join("");
+const SIZE = 12;
+let page = 0, shown = builds;
+function card(b) {
+  const stats = DATA.stats.map(s => `<div><span>${esc(s)}</span><b>${b.stats[s]}</b></div>`).join("");
+  return `<section><h3>${b.name ? nice(b.name) : `#${b.number}`}</h3>
+    <div class="small">best turn ${b.damage}${b.used.length ? ": " + b.used.map(([n, k]) => `${k}× ${nice(n)}`).join(", ") : ""}</div>
+    <div class="stats">${stats}</div>
+    <div class="list"><span>weapons</span> ${b.weapons.map(nice).join(", ")}</div>
+    <div class="list"><span>chips (${b.chips.length})</span> ${b.chips.map(nice).join(", ")}</div>
+    <div class="list"><span>components</span> ${b.components.map(nice).join(", ")}</div></section>`;
+}
+function draw() {
+  const pages = Math.ceil(shown.length / SIZE);
+  page = Math.max(0, Math.min(pages - 1, page));
+  $("where").textContent = `page ${page + 1} of ${pages}`;
+  $("prev").disabled = page === 0;
+  $("next").disabled = page === pages - 1;
+  $("cards").innerHTML = (page === 0 ? DATA.known : []).concat(shown.slice(page * SIZE, (page + 1) * SIZE)).map(card).join("");
+}
+$("prev").onclick = () => { page--; draw(); };
+$("next").onclick = () => { page++; draw(); };
+$("sort").onchange = () => {
+  const [i, way] = $("sort").value.split(",").map(Number);
+  shown = $("sort").value ? [...builds].sort((a, b) => way * (measures[i][1](a) - measures[i][1](b))) : builds;
+  page = 0;
+  draw();
+};
+draw();
+document.addEventListener("pointermove", event => {
+  const text = event.target.dataset && event.target.dataset.tip;
+  $("tip").style.display = text ? "block" : "none";
+  if (!text) return;
+  $("tip").textContent = text;
+  $("tip").style.left = Math.min(event.clientX + 12, innerWidth - 200) + "px";
+  $("tip").style.top = event.clientY + 12 + "px";
+});
+</script>
+</body>
+</html>

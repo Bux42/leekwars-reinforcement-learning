@@ -12,6 +12,9 @@ REWARD_PARTS = ("life", "total_life", "summons", "outcome", "duration", "actions
 EPISODE_FIELDS = ("turns", "winner", "decisions_0", "decisions_1", "actions_0", "actions_1",
                   "life_0", "life_1", "known_0", "known_1", "redrawn")
 
+# Instead of an action: the environment waits, and only its done is cleared.
+WAIT = -1
+
 
 def action_table():
     """What each action is: array (actions, 4) of kind, item, dx, dy.
@@ -122,7 +125,7 @@ class VecEnv:
         self._check(self._lib.leekrl_vec_reset(self._vec))
 
     def step(self, actions):
-        """One legal action per environment. The GIL is released meanwhile."""
+        """One legal action per environment, or WAIT. The GIL is released meanwhile."""
         self._open()
         actions = np.ascontiguousarray(actions, np.int32)
         if actions.shape != (self.envs,):

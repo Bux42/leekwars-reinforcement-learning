@@ -184,10 +184,11 @@ class PairHead(nn.Module):
 
 class Policy(nn.Module):
     def __init__(self, actions, floats, branch=128, hidden=256, mask_input=True,
-                 head="flat"):
+                 head="flat", layers=2):
         super().__init__()
         self.settings = {"actions": actions, "floats": floats, "branch": branch,
-                         "hidden": hidden, "mask_input": mask_input, "head": head}
+                         "hidden": hidden, "mask_input": mask_input, "head": head,
+                         "layers": layers}
         # A vector per (cell, category) for obstacles and entities, and one per position
         # on the map: together they say as much as the whole map.
         self.map = nn.EmbeddingBag(MAP_CELLS * (CATEGORIES - FREE - 1), branch, mode="sum")
@@ -198,9 +199,10 @@ class Policy(nn.Module):
         # A vector per action, summed over the legal ones.
         self.mask = nn.EmbeddingBag(actions, branch, mode="sum") if mask_input else None
         width = branch * (3 if mask_input else 2)
-        self.trunk = nn.Sequential(nn.LayerNorm(width), nn.ReLU(),
-                                   nn.Linear(width, hidden), nn.ReLU(),
-                                   nn.Linear(hidden, hidden), nn.ReLU())
+        trunk = [nn.LayerNorm(width), nn.ReLU()]
+        for i in range(layers):
+            trunk += [nn.Linear(hidden if i else width, hidden), nn.ReLU()]
+        self.trunk = nn.Sequential(*trunk)
         if head == "flat":
             self.policy = FlatHead(hidden, actions)
         elif head == "pair":

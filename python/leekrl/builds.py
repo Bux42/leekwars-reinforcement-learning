@@ -1,9 +1,10 @@
 """Known builds, written by hand in builds/known_builds.json."""
 
+import ctypes
 import json
 from pathlib import Path
 
-from .native import ROOT, STATS, Build, library
+from .native import ROOT, STATS, Build, BuildOptions, library
 
 
 def _read(path):
@@ -59,3 +60,48 @@ def load_known_builds(path=None, data=ROOT):
             build.bought[i] = totals[stat] - base[i] - given
         builds.append((name, float(entry.get("weight", 1)), build))
     return builds
+
+
+def random_builds(count, seed=1, skew=None):
+    """Builds drawn as for training fights, where known builds are not used."""
+    lib = library()
+    excluded = ctypes.POINTER(ctypes.c_int)(ctypes.c_int.in_dll(lib,
+                                                               "leekrl_solo_excluded_items"))
+    size = ctypes.c_size_t.in_dll(lib, "leekrl_solo_excluded_count")
+    catalog, pool = ctypes.c_void_p(), None
+    options, state, builds = BuildOptions(), ctypes.c_uint64(seed), []
+    lib.leekrl_build_options_init(ctypes.byref(options))
+    if skew is not None:
+        options.skew = skew
+    if lib.leekrl_action_catalog_create_without(excluded, size, ctypes.byref(catalog)):
+        raise RuntimeError("cannot list the actions")
+    try:
+        pool = lib.leekrl_build_pool_create(catalog)
+        if not pool:
+            raise RuntimeError("cannot list the items")
+        for _ in range(count):
+            build = Build()
+            if not lib.leekrl_build_random(pool, ctypes.byref(options), ctypes.byref(state),
+                                           ctypes.byref(build)):
+                raise RuntimeError("cannot draw a build")
+            builds.append(build)
+    finally:
+        if pool:
+            lib.leekrl_build_pool_destroy(pool)
+        lib.leekrl_action_catalog_destroy(catalog)
+    return builds
+
+
+def describe(build, data=ROOT):
+    """Names and final values of a build."""
+    def names(file, key):
+        return {entry[key]: entry["name"] for entry in _read(Path(data) / file).values()}
+
+    weapons, chips = names("weapons.json", "item"), names("chips.json", "id")
+    components = names("components.json", "id")
+    return {"stats": {name: library().leekrl_build_stat(ctypes.byref(build), i)
+                      for i, name in enumerate(STATS)},
+            "bought": dict(zip(STATS, build.bought)),
+            "components": [components[i] for i in build.components],
+            "weapons": [weapons[i] for i in build.weapons],
+            "chips": [chips[i] for i in build.chips[:build.n_chips]]}

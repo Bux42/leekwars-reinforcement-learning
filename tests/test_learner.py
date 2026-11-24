@@ -17,7 +17,8 @@ if torch is not None:
     from leekrl import VecEnv, action_table
     from leekrl.model import Distribution, Legal, Policy, map_index
     from leekrl.ppo import Rollout, advantages, unpack
-    from leekrl.train import Config, evaluate, inputs, load_policy, parse, train
+    from leekrl.train import (Config, evaluate, inputs, load_policy, parse, random_actions,
+                              train)
 
 
 def small(**changes):
@@ -368,11 +369,47 @@ class LearnerTests(unittest.TestCase):
     def test_evaluation(self):
         with VecEnv(1) as env:
             model = Policy(env.actions, env.float_count, 16, 16)
-        result = evaluate(model, small(), (), 16, seed=1)
-        self.assertAlmostEqual(result["wins"] + result["losses"] + result["draws"], 1)
-        self.assertEqual(result, evaluate(model, small(), (), 16, seed=1))
-        against_itself = evaluate(model, small(), (), 16, seed=1, opponent=model, greedy=True)
-        self.assertAlmostEqual(sum(against_itself[k] for k in ("wins", "losses", "draws")), 1)
+        results = evaluate(model, small(), (), 16, 1, ("random", "idle", model))
+        self.assertEqual(len(results), 3)
+        for result in results:
+            self.assertAlmostEqual(sum(result[k] for k in ("wins", "losses", "draws")), 1)
+        self.assertEqual(results, evaluate(model, small(), (), 16, 1,
+                                           ("random", "idle", model)))
+        mirror = evaluate(model, small(), (), 16, 1, (model,), greedy=True)[0]
+        self.assertAlmostEqual(sum(mirror[k] for k in ("wins", "losses", "draws")), 1)
+
+    def test_fight_figures(self):
+        from types import SimpleNamespace
+        from leekrl import EPISODE_FIELDS
+        from leekrl.train import Fights
+        episode = np.zeros((3, len(EPISODE_FIELDS)), np.float32)
+        for row, values in zip(episode, ((10, 0, 30, 50), (30, -1, 100, 140), (64, 1, 9, 9))):
+            for name, value in zip(("turns", "winner", "actions_0", "actions_1"), values):
+                row[EPISODE_FIELDS.index(name)] = value
+        fights = Fights()
+        fights.collect(SimpleNamespace(done=np.array([1, 1, 0]), episode=episode,
+                                       end_rewards=np.zeros((3, 2, 6), np.float32)))
+        report = fights.report()
+        self.assertEqual(report["fights/finished"], 2)
+        self.assertEqual(report["fights/actions"], 80)
+        self.assertEqual(report["fights/actions_per_turn"], 4)
+
+    def test_random_actions(self):
+        """Uniform over the legal actions, read from packed bits."""
+        random = np.random.default_rng(2)
+        legal = random.random((6, 10566)) < 0.002
+        legal[:, [0, 10565]] = True
+        legal[3] = False
+        legal[3, 10565] = True
+        mask = np.packbits(legal, axis=1, bitorder="little")
+        generator = torch.Generator().manual_seed(1)
+        counts = np.zeros(legal.shape)
+        draws = 4000
+        for _ in range(draws):
+            counts[np.arange(6), random_actions(mask, generator)] += 1
+        self.assertEqual(counts[~legal].sum(), 0)
+        expected = legal * draws / legal.sum(1, keepdims=True)
+        self.assertLess((np.abs(counts - expected) / np.sqrt(np.maximum(expected, 1))).max(), 5)
 
     def test_peek(self):
         from leekrl import peek

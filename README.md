@@ -181,13 +181,18 @@ python -m leekrl.train --name first-run --updates 1000
 Every setting of `Config` in `python/leekrl/train.py` is an option. Runs go to
 `runs/<name>`: settings, `metrics.jsonl` and checkpoints. `--deterministic` gives identical
 results for identical settings on the same machine. `--wandb online` sends metrics and
-settings to Weights & Biases, after `wandb login`; `--wandb offline` keeps them in the run
-folder. To stop early, press Ctrl+C or create a file named `stop` in the run's folder: the
+settings to Weights & Biases, after `wandb login`, without the email, computer name or
+paths W&B normally adds; `--wandb offline` keeps them in the run folder. To stop early, press Ctrl+C or create a file named `stop` in the run's folder: the
 current update is finished and a checkpoint saved, to continue with `--resume`.
+
+The network's size is set by `--branch` (width of what each kind of input becomes),
+`--hidden` and `--layers`.
 
 `python -m leekrl.peek --checkpoint runs/first-run/checkpoint_000050.pt` writes a local
 HTML page to step through fights: what the network receives, decoded, and what it makes of
 it. `--peek-every 50` writes one regularly during training.
+
+`python -m leekrl.show_builds` writes another one about the random builds of training fights.
 
 ### Builds
 

@@ -295,6 +295,7 @@ static void step_task(void *context, int index)
     leekrl_action_status status;
     int result;
     vec->buffers.done[index] = 0;
+    if (chosen == LEEKRL_VEC_WAIT) return;
     if (!actor || chosen < 0 || (size_t)chosen >= vec->actions || !env->legal[chosen]) {
         char detail[32];
         snprintf(detail, sizeof(detail), "%d", (int)chosen);

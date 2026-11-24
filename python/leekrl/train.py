@@ -28,7 +28,7 @@ from .builds import load_known_builds
 from .model import Policy
 from .native import ROOT
 from .ppo import Rollout, unpack, update
-from .vec import EPISODE_FIELDS, REWARD_PARTS, VecEnv
+from .vec import EPISODE_FIELDS, REWARD_PARTS, WAIT, VecEnv
 
 
 @dataclass
@@ -48,6 +48,7 @@ class Config:
     # Network
     branch: int = 128
     hidden: int = 256
+    layers: int = 2
     mask_input: bool = True
     head: str = "flat"             # flat (one output per action) or pair (item x cell)
     # PPO
@@ -66,7 +67,7 @@ class Config:
     device: str = "auto"           # auto: cuda if available, else cpu
     torch_threads: int = 8
     deterministic: bool = False
-    eval_every: int = 20           # updates between evaluations, 0 to disable
+    eval_every: int = 100          # updates between evaluations, 0 to disable
     eval_fights: int = 200
     save_every: int = 50
     peek_every: int = 0            # updates between pages showing fights, 0 to disable
@@ -87,27 +88,44 @@ def seed_everything(config):
         torch.backends.cudnn.benchmark = False
 
 
-def inputs(env, device):
+def inputs(env, device, rows=slice(None)):
     """What the network needs, copied from the environment's current arrays."""
-    return (torch.tensor(env.map, device=device), torch.tensor(env.floats, device=device),
-            unpack(torch.tensor(env.mask, device=device), env.actions))
+    return (torch.tensor(env.map[rows], device=device),
+            torch.tensor(env.floats[rows], device=device),
+            unpack(torch.tensor(env.mask[rows], device=device), env.actions))
 
 
-def random_actions(env, generator):
-    """Uniform legal actions, one per environment."""
-    legal = unpack(env.mask, env.actions)
-    counts = legal.sum(1)
-    ends = counts.cumsum(0)
-    picked = ends - counts + (torch.rand(env.envs, generator=generator, dtype=torch.float64)
-                              * counts).long()
-    return legal.nonzero(as_tuple=True)[1][picked].numpy()
+BIT_COUNTS = np.array([bin(byte).count("1") for byte in range(256)], np.int32)
 
 
-def scripted(opponent, env, generator):
+def random_actions(mask, generator):
+    """A uniform legal action per row of packed bits."""
+    index = np.arange(len(mask))
+    ends = BIT_COUNTS[mask].cumsum(1)       # legal actions up to each byte
+    # Which one of the legal actions, then the byte and the bit that hold it.
+    picked = (torch.rand(len(mask), generator=generator, dtype=torch.float64).numpy()
+              * ends[:, -1]).astype(np.int64)
+    byte = (ends > picked[:, None]).argmax(1)
+    picked -= ends[index, byte] - BIT_COUNTS[mask[index, byte]]
+    bits = np.unpackbits(mask[index, byte][:, None], axis=1, bitorder="little")
+    return byte * 8 + (bits.cumsum(1) > picked[:, None]).argmax(1)
+
+
+def scripted(opponent, mask, generator):
     """Actions of an opponent that does not learn: random, or idle (ends its turns)."""
     if opponent == "random":
-        return random_actions(env, generator)
-    return np.zeros(env.envs, np.int64)
+        return random_actions(mask, generator)
+    return np.zeros(len(mask), np.int64)
+
+
+def chosen(player, env, rows, generator, greedy=False):
+    """Actions of a player, scripted or a network, for some environments."""
+    if isinstance(player, str):
+        return scripted(player, env.mask[rows], generator)
+    with torch.no_grad():
+        distribution, _ = player(*inputs(env, next(player.parameters()).device, rows))
+        position = distribution.best() if greedy else distribution.sample(generator)
+        return distribution.legal.actions[position].cpu().numpy()
 
 
 class Fights:
@@ -143,6 +161,9 @@ class Fights:
             "fights/team_1_wins": (winner == 1).mean(),
             "fights/end_life": life.mean(),
             "fights/actions": (column["actions_0"] + column["actions_1"]).mean() / 2,
+            # Per team, its summons included. Ending a turn is not an action.
+            "fights/actions_per_turn": ((column["actions_0"] + column["actions_1"]).sum() / 2
+                                        / max(column["turns"].sum(), 1)),
             "fights/decisions": (column["decisions_0"] + column["decisions_1"]).mean() / 2,
             "fights/redrawn_maps": column["redrawn"].mean(),
         }
@@ -177,7 +198,7 @@ def collect(env, model, rollout, config, generator, fights):
         if config.opponent != "self":
             # Alternate sides: what is learned on one does not carry to the other.
             other = env.team != np.arange(env.envs) % 2
-            actions = np.where(other, scripted(config.opponent, env, generator), actions)
+            actions = np.where(other, scripted(config.opponent, env.mask, generator), actions)
             rollout.trained[t] = ~other
         rollout.actions[t] = torch.from_numpy(actions).to(rollout.device)
         env.step(actions)
@@ -191,49 +212,40 @@ def collect(env, model, rollout, config, generator, fights):
                                                                     "summons")}
 
 
-def evaluate(model, config, known, fights, seed, opponent="random", greedy=False):
-    """Fights of the model against an opponent: random, idle, or another model.
+def evaluate(model, config, known, fights, seed, opponents=("random",), greedy=False):
+    """Fights of the model against each opponent: random, idle, or another model.
 
-    The model plays team 0 in half of the environments. Returns shares of wins, losses
-    and draws among the first `fights` fights of each environment.
+    The model plays team 0 in half of them. Returns, for each opponent, the shares of wins,
+    losses and draws. All the fights are played side by side, one per environment:
+    counting the first ones to finish would favor short ones.
     """
-    envs = min(128, fights)
-    quota = -(-fights // envs)
-    device = next(model.parameters()).device
+    envs = fights * len(opponents)
+    faced = np.arange(envs) % len(opponents)
+    side = np.arange(envs) // len(opponents) % 2
     generator = torch.Generator().manual_seed(seed)
-    side = np.arange(envs) % 2
-    finished = np.zeros(envs, int)
-    outcome = {"wins": 0, "losses": 0, "draws": 0}
-    turns = []
+    playing = np.ones(envs, bool)
+    winner, turns = np.zeros(envs, int), np.zeros(envs)
     with VecEnv(envs, threads=config.env_threads, seed=seed, known_builds=known,
                 known_probability=config.known_probability, skew=config.skew,
                 trim_useless=config.trim_useless) as env:
         env.reset()
-        while (finished < quota).any():
+        while playing.any():
             mine = env.team == side
-            with torch.no_grad():
-                distribution, _ = model(*inputs(env, device))
-                position = distribution.best() if greedy else distribution.sample(generator)
-                actions = distribution.legal.actions[position].cpu().numpy()
-                if isinstance(opponent, str):
-                    others = scripted(opponent, env, generator)
-                else:
-                    distribution, _ = opponent(*inputs(env, device))
-                    position = (distribution.best() if greedy
-                                else distribution.sample(generator))
-                    others = distribution.legal.actions[position].cpu().numpy()
-            env.step(np.where(mine, actions, others))
-            # Only the first fights count, or short ones would be over-represented.
-            for i in np.flatnonzero((env.done == 1) & (finished < quota)):
-                winner = int(env.episode[i, EPISODE_FIELDS.index("winner")])
-                turns.append(env.episode[i, EPISODE_FIELDS.index("turns")])
-                finished[i] += 1
-                outcome["draws" if winner < 0 else
-                        "wins" if winner == side[i] else "losses"] += 1
-    total = sum(outcome.values())
-    result = {name: value / total for name, value in outcome.items()}
-    result["turns"] = float(np.mean(turns))
-    return result
+            actions = np.full(envs, WAIT)
+            for i, player in enumerate((model, *opponents)):
+                rows = np.flatnonzero(playing & (mine if i == 0 else
+                                                 ~mine & (faced == i - 1)))
+                if len(rows):
+                    actions[rows] = chosen(player, env, rows, generator, greedy)
+            env.step(actions)
+            over = playing & (env.done == 1)
+            winner[over] = env.episode[over, EPISODE_FIELDS.index("winner")]
+            turns[over] = env.episode[over, EPISODE_FIELDS.index("turns")]
+            playing &= ~over
+    return [{"wins": float((winner == side)[faced == i].mean()),
+             "losses": float((winner == 1 - side)[faced == i].mean()),
+             "draws": float((winner == -1)[faced == i].mean()),
+             "turns": float(turns[faced == i].mean())} for i in range(len(opponents))]
 
 
 def commit():
@@ -260,7 +272,11 @@ class Log:
             import wandb
             self.run = wandb.init(project=config.wandb_project, name=config.name,
                                   mode=config.wandb, dir=str(folder),
-                                  config={**asdict(config), **details})
+                                  config={**asdict(config), **details},
+                                  # Neither email, computer name nor paths.
+                                  settings=wandb.Settings(
+                                      host="-", email="-", disable_git=True,
+                                      x_disable_meta=True, x_disable_machine_info=True))
 
     def write(self, step, metrics):
         self.file.write(json.dumps({"update": step, **metrics}) + "\n")
@@ -268,7 +284,7 @@ class Log:
         if self.run:
             self.run.log(metrics, step=step)
         shown = {name.split("/")[-1]: metrics[name] for name in (
-            "fights/total", "fights/turns", "fights/draws", "ppo/entropy",
+            "fights/total", "fights/turns", "fights/draws", "fights/actions_per_turn", "ppo/entropy",
             "ppo/explained_variance", "time/decisions_per_second", "eval/idle_wins",
             "eval/idle_turns", "eval/random_wins") if name in metrics}
         print(f"update {step}  " + "  ".join(f"{k} {v:.3g}" for k, v in shown.items()),
@@ -343,14 +359,15 @@ def train(config, folder=None):
     details = {"data_hash": env.data_hash, "commit": commit(),
                "known_names": env.known_names}
     model = Policy(env.actions, env.float_count, config.branch, config.hidden,
-                   config.mask_input, config.head).to(device)
+                   config.mask_input, config.head, config.layers).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, eps=1e-5,
                                  fused=True)
     start = decisions = 0
     fights = Fights()
     if config.resume:
         data = torch.load(config.resume, map_location=device, weights_only=True)
-        if data["data_hash"] != env.data_hash or data["settings"] != model.settings:
+        settings = {"layers": 2, **data["settings"]}    # older ones do not say
+        if data["data_hash"] != env.data_hash or settings != model.settings:
             raise ValueError("the checkpoint was made with other game data or another network")
         model.load_state_dict(data["model"])
         optimizer.load_state_dict(data["optimizer"])
@@ -386,10 +403,13 @@ def train(config, folder=None):
                     "time/update_seconds": ended - collected})
                 last = step == config.updates or bool(stop)
                 if config.eval_every and (step % config.eval_every == 0 or last):
-                    for opponent in ("idle", "random"):
-                        for name, value in evaluate(model, config, known, config.eval_fights,
-                                                    1_000_003, opponent).items():
+                    began = time.perf_counter()
+                    opponents = ("idle", "random")
+                    for opponent, result in zip(opponents, evaluate(
+                            model, config, known, config.eval_fights, 1_000_003, opponents)):
+                        for name, value in result.items():
                             metrics[f"eval/{opponent}_{name}"] = value
+                    metrics["time/eval_seconds"] = time.perf_counter() - began
                 log.write(step, metrics)
                 history.append(metrics)
                 if config.save_every and (step % config.save_every == 0 or last):
@@ -427,6 +447,8 @@ def parse(arguments=None):
     config = Config(**vars(parser.parse_args(arguments)))
     if config.opponent not in ("self", "random", "idle"):
         parser.error("--opponent must be self, random or idle")
+    if config.layers < 1:
+        parser.error("--layers must be at least 1")
     if config.head not in ("flat", "pair"):
         parser.error("--head must be flat or pair")
     if config.wandb not in ("disabled", "offline", "online"):

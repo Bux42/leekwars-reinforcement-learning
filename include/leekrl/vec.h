@@ -117,7 +117,10 @@ int leekrl_vec_add_build(leekrl_vec *vec, const leekrl_build *build, double weig
  * error: see leekrl_vec_error. */
 int leekrl_vec_reset(leekrl_vec *vec);
 
-/* actions holds one legal action per environment. Returns 1, or 0 if any
+/* Instead of an action: the environment waits, and only its done is cleared. */
+#define LEEKRL_VEC_WAIT (-1)
+
+/* actions holds one legal action per environment, or LEEKRL_VEC_WAIT. Returns 1, or 0 if any
  * environment failed: the vec must then be reset or destroyed. Results depend
  * on the seed and the actions, never on the number of threads. */
 int leekrl_vec_step(leekrl_vec *vec, const int32_t *actions);

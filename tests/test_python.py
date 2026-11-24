@@ -14,7 +14,7 @@ except ImportError:
     np = None
 
 if np is not None:
-    from leekrl import EPISODE_FIELDS, VecEnv, load_known_builds
+    from leekrl import EPISODE_FIELDS, WAIT, VecEnv, load_known_builds
 
 
 def play(steps, seed=1, **options):
@@ -62,6 +62,56 @@ class PythonTests(unittest.TestCase):
                 self.assertEqual(x.tobytes(), y.tobytes())
         other = play(60, seed=2)
         self.assertFalse(np.array_equal(first[-1][0], other[-1][0]))
+
+    def test_random_builds(self):
+        from leekrl import show_builds
+        from leekrl.builds import describe, random_builds
+        builds = random_builds(200, seed=7)
+        described = [describe(b) for b in builds]
+        self.assertEqual(described, [describe(b) for b in random_builds(200, seed=7)])
+        self.assertNotEqual(described, [describe(b) for b in random_builds(200, seed=8)])
+        # Legal, as far as the environment is concerned.
+        known = [(str(i), 1, b) for i, b in enumerate(builds)]
+        with VecEnv(1, known_builds=known):
+            pass
+        for build in described:
+            self.assertEqual((len(build["components"]), len(build["weapons"])), (8, 4))
+            self.assertLessEqual(len(build["chips"]), max(0, build["stats"]["ram"]))
+        table = {"a": (5, 2, True, 100, 0), "b": (4, 1, False, 0, 50)}
+        build = {"stats": {"tp": 15, "strength": 100, "magic": 0},
+                 "weapons": ["a", "unknown"], "chips": ["b"]}
+        # Twice a (11 TP, 1 of which to take it), and b.
+        self.assertEqual(show_builds.best_turn(build, table), (450, (("a", 2), ("b", 1))))
+        build["stats"]["tp"] = 5
+        self.assertEqual(show_builds.best_turn(build, table), (50, (("b", 1),)))
+        with tempfile.TemporaryDirectory() as folder:
+            page = show_builds.write(Path(folder) / "page.html", show_builds.prepare(20))
+            self.assertNotIn("/*DATA*/null", page.read_text("utf8"))
+
+    def test_waiting(self):
+        """An environment that waits only clears done, and others are not affected."""
+        names = ("floats", "map", "mask", "rewards", "team", "first", "end_rewards", "episode")
+        random = np.random.default_rng(1)
+        with VecEnv(2, threads=2, seed=4) as env, VecEnv(2, threads=2, seed=4) as other:
+            env.reset()
+            other.reset()
+            fights = 0
+            while fights < 2:
+                actions = [int(random.choice(np.flatnonzero(row))) for row in env.legal()]
+                env.step(actions)
+                other.step(actions)
+                fights += int(env.done[0])
+                kept = {name: getattr(env, name)[0].copy() for name in names}
+                legal = env.legal()
+                action = int(random.choice(np.flatnonzero(legal[1])))
+                env.step([WAIT, action])
+                self.assertEqual(env.done[0], 0)
+                for name in names:
+                    np.testing.assert_array_equal(getattr(env, name)[0], kept[name])
+                other.step([WAIT, action])
+                np.testing.assert_array_equal(env.floats, other.floats)
+            with self.assertRaisesRegex(RuntimeError, "illegal action"):
+                env.step([-2, 0])
 
     def test_errors(self):
         with self.assertRaises(ValueError):
