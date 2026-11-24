@@ -76,6 +76,9 @@ int leekrl_build_validate(const leekrl_build_pool *pool, const leekrl_build *bui
  * stats can be negative, as in the game. */
 int leekrl_build_stat(const leekrl_build *build, leekrl_stat stat);
 
+/* Value of a stat at level 301, before capital and components. */
+int leekrl_build_base(leekrl_stat stat);
+
 /* Capital needed to buy that many points of a stat from zero, or -1 if no
  * purchase sequence gives exactly that amount. */
 int leekrl_build_cost(leekrl_stat stat, int bought);

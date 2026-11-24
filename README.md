@@ -140,12 +140,34 @@ observation and mask for bootstrapping. Seeds use their low 31 bits.
 
 The fight stays suspended between steps, so a step only executes its own action
 (`lw_fight_step_*` in the submodule's `lw_fight.h`). Registries and item definitions must
-remain unchanged while contexts are in use. No concurrent generator use, opponent
-policy, self-play or automatic build randomization is provided yet.
+remain unchanged while contexts are in use. For self-play and random builds, see
+the batched environment below.
 
 `tests/test_stepping.c` plays random fights through the engine's AI callback,
 step by step, and through clones, and requires identical results. Pass a fight
 count and a first seed to run more: `test_stepping 5000 1`.
+
+### Batched self-play environment
+
+`leekrl/vec.h` plays many 1v1 fights side by side with several threads, the agent
+controlling both teams. Finished fights are replaced at once, with random builds or,
+for 1% of the sides by default, a known build. Results depend on the seed and the
+actions, never on the number of threads.
+
+`python/leekrl` wraps it, with NumPy arrays written directly by C:
+
+```python
+from leekrl import VecEnv, load_known_builds
+
+env = VecEnv(256, seed=1, known_builds=load_known_builds())
+env.reset()
+env.step(actions)  # one legal action per environment
+```
+
+Rewards belong to the previous decision of the team that decides now: see `vec.h`.
+The package looks for the C library under `build*/`, or at `LEEKRL_LIBRARY`. Known
+builds are read from `builds/known_builds.json`; `known_builds.example.json` shows the
+format, where characteristics include components.
 
 ### Builds
 

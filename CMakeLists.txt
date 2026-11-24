@@ -14,12 +14,15 @@ add_library(leekrl STATIC
     src/ppo.c
     src/reward.c
     src/rules.c
+    src/threads.c
 )
 target_include_directories(leekrl PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_compile_features(leekrl PUBLIC c_std_99)
-target_link_libraries(leekrl PUBLIC lwengine)
+find_package(Threads REQUIRED)
+target_link_libraries(leekrl PUBLIC lwengine Threads::Threads)
+set_target_properties(leekrl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(NOT MSVC)
     target_link_libraries(leekrl PUBLIC m)
 endif()
@@ -81,6 +84,10 @@ if(BUILD_TESTING)
         add_executable(test_reward tests/test_reward.c)
         target_link_libraries(test_reward PRIVATE leekrl)
         add_test(NAME leekwars_reward COMMAND test_reward)
+
+        add_executable(test_vec tests/test_vec.c)
+        target_link_libraries(test_vec PRIVATE leekrl)
+        add_test(NAME leekwars_vec COMMAND test_vec)
     endif()
 endif()
 
@@ -106,12 +113,32 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/weapons.json" AND
             "${CMAKE_CURRENT_SOURCE_DIR}/summons.json"
             "${CMAKE_CURRENT_SOURCE_DIR}/components.json"
         VERBATIM)
-    target_sources(leekrl PRIVATE "${LEEKRL_SNAPSHOT_C}" src/build.c)
+    target_sources(leekrl PRIVATE "${LEEKRL_SNAPSHOT_C}" src/build.c src/vec.c)
     target_compile_definitions(leekrl PUBLIC LEEKRL_HAS_ITEM_SNAPSHOT=1)
+
+    # Loaded by the Python package in python/leekrl.
+    add_library(leekrl_shared SHARED src/shared.c)
+    set_target_properties(leekrl_shared PROPERTIES OUTPUT_NAME leekrl PREFIX ""
+                          WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    if(MINGW)
+        target_link_libraries(leekrl_shared PRIVATE
+            -Wl,--whole-archive leekrl -Wl,--no-whole-archive
+            -static -Wl,--export-all-symbols)
+    elseif(MSVC)
+        target_link_libraries(leekrl_shared PRIVATE leekrl)
+        target_link_options(leekrl_shared PRIVATE "/WHOLEARCHIVE:leekrl")
+    else()
+        target_link_libraries(leekrl_shared PRIVATE
+            -Wl,--whole-archive leekrl -Wl,--no-whole-archive)
+    endif()
     if(BUILD_TESTING)
         add_test(NAME leekwars_snapshot_generator
             COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_item_snapshot_generator.py)
         set_tests_properties(leekwars_snapshot_generator PROPERTIES
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME leekwars_python
+            COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_python.py")
+        set_tests_properties(leekwars_python PROPERTIES
+            ENVIRONMENT "LEEKRL_LIBRARY=$<TARGET_FILE:leekrl_shared>")
     endif()
 endif()

@@ -65,6 +65,11 @@ static const cost_step *next_step(int stat, int bought)
     return &costs[stat].steps[i];
 }
 
+int leekrl_build_base(leekrl_stat stat)
+{
+    return (int)stat >= 0 && stat < LEEKRL_STAT_COUNT ? base_stats[stat] : 0;
+}
+
 int leekrl_build_cost(leekrl_stat stat, int bought)
 {
     int total = 0, points = 0;
