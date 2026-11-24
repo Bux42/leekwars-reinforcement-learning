@@ -68,17 +68,18 @@ class Distribution:
 
     def sample(self, generator=None):
         """Positions in the flat lists, one per row."""
+        # On CPU: short lists, and floating-point cumsum is not deterministic on GPU.
         legal = self.legal
-        cumulated = self.probs.double().cumsum(0)
-        ends = cumulated[legal.offsets + legal.counts - 1]
+        offsets, counts = legal.offsets.cpu(), legal.counts.cpu()
+        cumulated = self.probs.detach().cpu().double().cumsum(0)
+        ends = cumulated[offsets + counts - 1]
         starts = torch.cat([ends.new_zeros(1), ends[:-1]])
-        uniform = torch.rand(legal.batch, dtype=torch.float64, generator=generator,
-                             device=cumulated.device)
+        uniform = torch.rand(legal.batch, dtype=torch.float64, generator=generator)
         position = torch.searchsorted(cumulated, starts + uniform * (ends - starts),
                                       right=True)
         # Rounding must never leave the row.
-        return torch.minimum(torch.maximum(position, legal.offsets),
-                             legal.offsets + legal.counts - 1)
+        position = torch.minimum(torch.maximum(position, offsets), offsets + counts - 1)
+        return position.to(self.probs.device)
 
     def best(self):
         """Positions of the likeliest actions, the first one on ties."""
@@ -104,19 +105,19 @@ class Distribution:
 
 
 class FlatHead(nn.Module):
-    """One independent output per action, computed for the legal ones only."""
+    """One independent output per action."""
 
     def __init__(self, hidden, actions):
         super().__init__()
-        self.weight = nn.Embedding(actions, hidden)
-        self.bias = nn.Embedding(actions, 1)
+        self.logits = nn.Linear(hidden, actions)
         # Nearly uniform at first.
-        nn.init.normal_(self.weight.weight, std=0.001)
-        nn.init.zeros_(self.bias.weight)
+        nn.init.normal_(self.logits.weight, std=0.001)
+        nn.init.zeros_(self.logits.bias)
 
     def forward(self, hidden, cells, floats, legal):
-        return ((hidden[legal.rows] * self.weight(legal.actions)).sum(1)
-                + self.bias(legal.actions).squeeze(1))
+        # Every output is computed: gathering the weights of the legal ones only is no
+        # faster, and takes far more memory.
+        return self.logits(hidden)[legal.rows, legal.actions]
 
 
 class PairHead(nn.Module):

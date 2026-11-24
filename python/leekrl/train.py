@@ -18,7 +18,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -37,9 +37,9 @@ class Config:
     seed: int = 1
     updates: int = 1000
     # Environment
-    envs: int = 256
-    steps: int = 64                # decisions per environment and update
-    env_threads: int = 8
+    envs: int = 1024
+    steps: int = 32                # decisions per environment and update
+    env_threads: int = 16
     known_builds: str = ""         # file, builds/known_builds.json by default
     known_probability: float = 0.01
     skew: float = 2.0
@@ -55,15 +55,15 @@ class Config:
     lam: float = 0.95
     learning_rate: float = 3e-4
     anneal: bool = False           # learning rate down to 0
-    epochs: int = 4
-    minibatch: int = 1024
+    epochs: int = 2
+    minibatch: int = 2048
     clip: float = 0.2
     value_weight: float = 0.5
-    entropy_weight: float = 0.01
+    entropy_weight: float = 0.003
     max_grad_norm: float = 0.5
     target_kl: float = 0.0         # stop an update's epochs above it, 0 to disable
     # Run
-    device: str = "cpu"
+    device: str = "auto"           # auto: cuda if available, else cpu
     torch_threads: int = 8
     deterministic: bool = False
     eval_every: int = 20           # updates between evaluations, 0 to disable
@@ -89,9 +89,8 @@ def seed_everything(config):
 
 def inputs(env, device):
     """What the network needs, copied from the environment's current arrays."""
-    return (torch.from_numpy(env.map.copy()).to(device),
-            torch.from_numpy(env.floats.copy()).to(device),
-            unpack(env.mask, env.actions).to(device))
+    return (torch.tensor(env.map, device=device), torch.tensor(env.floats, device=device),
+            unpack(torch.tensor(env.mask, device=device), env.actions))
 
 
 def random_actions(env, generator):
@@ -169,19 +168,18 @@ def collect(env, model, rollout, config, generator, fights):
     device = next(model.parameters()).device
     parts = np.zeros(len(REWARD_PARTS))
     for t in range(rollout.steps):
-        rollout.save(t, env)
         with torch.no_grad():
-            distribution, value = model(*inputs(env, device))
+            distribution, value = model(*rollout.save(t, env))
             position = distribution.sample(generator)
             actions = distribution.legal.actions[position].cpu().numpy()
-            rollout.log_probs[t] = distribution.log_probs[position].cpu().numpy()
+            rollout.log_probs[t] = distribution.log_probs[position]
         rollout.values[t] = value.cpu().numpy()
         if config.opponent != "self":
             # Alternate sides: what is learned on one does not carry to the other.
             other = env.team != np.arange(env.envs) % 2
             actions = np.where(other, scripted(config.opponent, env, generator), actions)
             rollout.trained[t] = ~other
-        rollout.actions[t] = actions
+        rollout.actions[t] = torch.from_numpy(actions).to(rollout.device)
         env.step(actions)
         fights.collect(env)
         parts += np.abs(env.rewards).mean(0)
@@ -332,6 +330,8 @@ def load_policy(path, device="cpu"):
 
 def train(config, folder=None):
     """Returns the model and the metrics of each update."""
+    if config.device == "auto":
+        config = replace(config, device="cuda" if torch.cuda.is_available() else "cpu")
     seed_everything(config)
     known = load_known_builds(config.known_builds or None)
     folder = Path(folder) if folder else ROOT / "runs" / config.name
@@ -356,7 +356,7 @@ def train(config, folder=None):
         optimizer.load_state_dict(data["optimizer"])
         start, decisions, fights.total = data["update"], data["decisions"], data["fights"]
     log = Log(config, folder, details)
-    rollout = Rollout(env, config.steps)
+    rollout = Rollout(env, config.steps, device)
     history = []
     env.reset()
     try:

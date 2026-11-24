@@ -23,7 +23,7 @@ if torch is not None:
 def small(**changes):
     settings = dict(envs=16, steps=8, updates=3, env_threads=4, torch_threads=4, branch=16,
                     hidden=16, minibatch=64, epochs=2, eval_every=0, save_every=0,
-                    deterministic=True)
+                    deterministic=True, device="cpu")
     return Config(**{**settings, **changes})
 
 
@@ -245,16 +245,14 @@ class LearnerTests(unittest.TestCase):
             self.assertTrue(rollout.valid.any())
             for t in range(8):
                 mask = unpack(rollout.mask[t], env.actions)
-                self.assertTrue(mask[torch.arange(16), torch.from_numpy(rollout.actions[t])]
-                                .all())
-                distribution, value = model(torch.from_numpy(rollout.map[t]),
-                                            torch.from_numpy(rollout.floats[t]), mask)
-                position = distribution.find(torch.from_numpy(rollout.actions[t]))
+                self.assertTrue(mask[torch.arange(16), rollout.actions[t]].all())
+                distribution, value = model(rollout.map[t], rollout.floats[t], mask)
+                position = distribution.find(rollout.actions[t])
                 np.testing.assert_allclose(distribution.log_probs[position].detach(),
                                            rollout.log_probs[t], atol=1e-5)
                 np.testing.assert_allclose(value.detach(), rollout.values[t], atol=1e-5)
             seen = sum(len(batch["actions"]) for batch in rollout.minibatches(
-                50, torch.Generator().manual_seed(2), "cpu"))
+                50, torch.Generator().manual_seed(2)))
             self.assertEqual(seen, rollout.valid.sum())
 
     def test_deterministic_training(self):
@@ -288,7 +286,31 @@ class LearnerTests(unittest.TestCase):
             self.assertTrue(rollout.valid[~other & (rollout.team == 0)].any())
             self.assertTrue(rollout.valid[~other & (rollout.team == 1)].any())
             if opponent == "idle":
-                self.assertFalse(rollout.actions[other].any())
+                self.assertFalse(rollout.actions.numpy()[other].any())
+
+    @unittest.skipUnless(torch is not None and torch.cuda.is_available(), "no GPU")
+    def test_gpu(self):
+        """Same results as on CPU, up to rounding, and the same ones each time."""
+        with VecEnv(32, threads=4, seed=5) as env:
+            env.reset()
+            for head in ("flat", "pair"):
+                model = Policy(env.actions, env.float_count, 16, 16, head=head)
+                with torch.no_grad():
+                    a, u = model(*inputs(env, "cpu"))
+                    b, v = model.cuda()(*inputs(env, "cuda"))
+                self.assertTrue(torch.equal(a.legal.actions, b.legal.actions.cpu()))
+                torch.testing.assert_close(a.log_probs, b.log_probs.cpu(), atol=1e-4, rtol=1e-4)
+                torch.testing.assert_close(u, v.cpu(), atol=1e-4, rtol=1e-4)
+                x, y = (d.sample(torch.Generator().manual_seed(1)) for d in (a, b))
+                self.assertTrue(torch.equal(x, y.cpu()))
+
+        def run():
+            with tempfile.TemporaryDirectory() as folder:
+                model, history = train(small(device="cuda"), folder)
+            return ([{k: v for k, v in m.items() if not k.startswith("time/")}
+                     for m in history],
+                    [p.detach().cpu().numpy().tobytes() for p in model.parameters()])
+        self.assertEqual(run(), run())
 
     def test_checkpoints(self):
         with tempfile.TemporaryDirectory() as folder:
