@@ -27,3 +27,7 @@ Thumbs.db
 
 # Python
 __pycache__/
+
+# Training
+runs/
+wandb/

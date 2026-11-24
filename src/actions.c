@@ -6,12 +6,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "lw_area.h"
 #include "lw_attack.h"
 #include "lw_bulb_template.h"
 #include "lw_chip.h"
 #include "lw_entity.h"
 #include "lw_fight.h"
 #include "lw_map.h"
+#include "lw_pathfinding.h"
 #include "lw_state.h"
 #include "lw_team.h"
 #include "lw_weapon.h"
@@ -495,33 +497,144 @@ static const catalog_item *find_item(const leekrl_action_catalog *catalog,
                                          sizeof(key), compare_items) : NULL;
 }
 
+/* What a cast needs to change anything. */
+typedef struct {
+    int always;                  /* whatever is reached */
+    int any_entity;              /* an entity of any kind is enough */
+    int n_targets;
+    int targets[LW_ATTACK_MAX_EFFECTS]; /* target filters of the other effects */
+} usefulness;
+
+#define CRITICAL_TO_HEAL 58 /* passive weapon effect */
+
+/* Casts of this entity can matter by themselves, through critical hits. */
+static int reacts_to_critical(const LwEntity *actor)
+{
+    int i, k;
+    for (i = 0; i < lw_entity_get_weapons_count(actor); ++i) {
+        const LwWeapon *weapon = lw_entity_get_weapon_at(actor, i);
+        for (k = 0; k < lw_weapon_get_passive_effects_count(weapon); ++k)
+            if (lw_effect_parameters_get_id(&lw_weapon_get_passive_effects(weapon)[k]) ==
+                CRITICAL_TO_HEAL) return 1;
+    }
+    return 0;
+}
+
+static void examine(const LwAttack *attack, usefulness *use)
+{
+    int i;
+    use->always = use->any_entity = use->n_targets = 0;
+    for (i = 0; i < lw_attack_get_effects_count(attack); ++i) {
+        const LwEffectParameters *effect = &attack->effects[i];
+        int modifiers = lw_effect_parameters_get_modifiers(effect);
+        switch (lw_effect_parameters_get_id(effect)) {
+        case LW_EFFECT_TYPE_SUMMON:
+        case LW_EFFECT_TYPE_RESURRECT:
+        case LW_EFFECT_TYPE_TELEPORT:
+            use->always = 1;
+            return;
+        case LW_EFFECT_TYPE_ATTRACT:
+        case LW_EFFECT_TYPE_PUSH:
+        case LW_EFFECT_TYPE_REPEL:
+            use->any_entity = 1;
+            break;
+        case LW_EFFECT_TYPE_PROPAGATION: /* only modifies the other effects */
+            break;
+        default:
+            if ((modifiers & LW_MODIFIER_ON_CASTER) &&
+                !(modifiers & LW_MODIFIER_MULTIPLIED_BY_TARGETS)) {
+                use->always = 1;
+                return;
+            }
+            use->targets[use->n_targets++] = lw_effect_parameters_get_targets(effect);
+        }
+    }
+}
+
+static int accepts(const usefulness *use, LwEntity *actor, LwEntity *entity)
+{
+    int i;
+    if (use->any_entity) return 1;
+    for (i = 0; i < use->n_targets; ++i)
+        if (lw_attack_filter_target(use->targets[i], actor, entity)) return 1;
+    return 0;
+}
+
+/* Largest distance of a cell of a fixed-shape area to its center. */
+static int area_reach(int area)
+{
+    switch (area) {
+    case LW_AREA_TYPE_CIRCLE1: return 1;
+    case LW_AREA_TYPE_CIRCLE2: case LW_AREA_TYPE_AREA_PLUS_2: case LW_AREA_TYPE_X_1:
+    case LW_AREA_TYPE_SQUARE_1: return 2;
+    case LW_AREA_TYPE_CIRCLE3: case LW_AREA_TYPE_AREA_PLUS_3: return 3;
+    case LW_AREA_TYPE_X_2: case LW_AREA_TYPE_SQUARE_2: return 4;
+    case LW_AREA_TYPE_X_3: return 6;
+    default: return -1; /* lines, allies, enemies */
+    }
+}
+
+static int useful(LwState *state, LwEntity *actor, const castable *item,
+                  const usefulness *use, LwCell *target)
+{
+    LwMap *map = lw_state_get_map(state);
+    int area = lw_attack_get_area_id(item->attack), reach, i, n;
+    LwCell cells[64];
+    if (use->always) return 1;
+    if (area == LW_AREA_TYPE_SINGLE_CELL) {
+        LwEntity *entity = lw_cell_get_player(target, map);
+        return entity && !lw_entity_is_dead(entity) && accepts(use, actor, entity);
+    }
+    /* Cheap check first: is any accepted entity near enough? */
+    reach = area_reach(area);
+    if (reach >= 0) {
+        for (i = 0; i < state->order.n_leeks; ++i) {
+            LwEntity *entity = state->order.leeks[i];
+            LwCell *cell = lw_entity_get_cell(entity);
+            if (cell && lw_pathfinding_get_case_distance(target, cell) <= reach &&
+                accepts(use, actor, entity)) break;
+        }
+        if (i == state->order.n_leeks) return 0;
+    }
+    n = lw_area_get_area(&item->attack->area, map, lw_entity_get_cell(actor), target, actor,
+                         cells, 64);
+    for (i = 0; i < n; ++i) {
+        LwEntity *entity = lw_cell_get_player(&cells[i], map);
+        if (entity && !lw_entity_is_dead(entity) && accepts(use, actor, entity)) return 1;
+    }
+    return 0;
+}
+
 static leekrl_action_status mask_item(const leekrl_action_catalog *catalog, LwState *state,
                                       LwEntity *actor, leekrl_action_kind kind, int id,
-                                      sight_cache *sight, uint8_t *mask)
+                                      sight_cache *sight, int trim, uint8_t *mask)
 {
     const catalog_item *entry = find_item(catalog, kind, id);
     LwMap *map = lw_state_get_map(state);
     LwCell *from = lw_entity_get_cell(actor);
     leekrl_action_status status;
     castable item;
+    usefulness use;
     size_t i;
     if (!entry) return LEEKRL_ACTION_OK;
     status = check_item(state, actor, kind, id, &item);
     if (status == LEEKRL_ACTION_ILLEGAL) return LEEKRL_ACTION_OK;
     if (status != LEEKRL_ACTION_OK) return status;
+    if (trim) examine(item.attack, &use);
     for (i = entry->first; i < entry->first + entry->count; ++i) {
         LwCell *target = cell_offset(map, from, catalog->actions[i].dx, catalog->actions[i].dy);
         if (!target) continue;
         status = check_target(state, actor, &item, target, sight);
-        if (status == LEEKRL_ACTION_OK) mask[i] = 1;
+        if (status == LEEKRL_ACTION_OK)
+            mask[i] = !trim || useful(state, actor, &item, &use, target);
         else if (status != LEEKRL_ACTION_ILLEGAL) return status;
     }
     return LEEKRL_ACTION_OK;
 }
 
-leekrl_action_status leekrl_action_catalog_mask(const leekrl_action_catalog *catalog,
-                                                LwFight *fight, LwEntity *actor,
-                                                uint8_t *mask)
+static leekrl_action_status catalog_mask(const leekrl_action_catalog *catalog,
+                                         LwFight *fight, LwEntity *actor, int trim,
+                                         uint8_t *mask)
 {
     LwState *state;
     LwMap *map;
@@ -546,21 +659,36 @@ leekrl_action_status leekrl_action_catalog_mask(const leekrl_action_catalog *cat
                           [cell->x - from->x + LEEKRL_MAX_MOVE_DISTANCE]] = 1;
     }
     memset(sight.visible, -1, sizeof(sight.visible));
+    if (trim && reacts_to_critical(actor)) trim = 0;
     for (i = 0; i < lw_entity_get_weapons_count(actor); ++i) {
         LwWeapon *weapon = lw_entity_get_weapon_at(actor, i);
         if (!weapon) continue;
         status = mask_item(catalog, state, actor, LEEKRL_ACTION_WEAPON,
-                           lw_weapon_get_id(weapon), &sight, mask);
+                           lw_weapon_get_id(weapon), &sight, trim, mask);
         if (status != LEEKRL_ACTION_OK) return status;
     }
     for (i = 0; i < lw_entity_get_chips_count(actor); ++i) {
         LwChip *chip = lw_entity_get_chip_at(actor, i);
         if (!chip) continue;
         status = mask_item(catalog, state, actor, LEEKRL_ACTION_CHIP,
-                           lw_chip_get_id(chip), &sight, mask);
+                           lw_chip_get_id(chip), &sight, trim, mask);
         if (status != LEEKRL_ACTION_OK) return status;
     }
     return LEEKRL_ACTION_OK;
+}
+
+leekrl_action_status leekrl_action_catalog_mask(const leekrl_action_catalog *catalog,
+                                                LwFight *fight, LwEntity *actor,
+                                                uint8_t *mask)
+{
+    return catalog_mask(catalog, fight, actor, 0, mask);
+}
+
+leekrl_action_status leekrl_action_catalog_useful_mask(const leekrl_action_catalog *catalog,
+                                                       LwFight *fight, LwEntity *actor,
+                                                       uint8_t *mask)
+{
+    return catalog_mask(catalog, fight, actor, 1, mask);
 }
 
 leekrl_action_status leekrl_action_mask(LwFight *fight, LwEntity *actor,

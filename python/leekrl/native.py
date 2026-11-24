@@ -32,6 +32,7 @@ class RewardOptions(Structure):
 class VecOptions(Structure):
     _fields_ = [("envs", c_int), ("threads", c_int), ("seed", c_uint64),
                 ("known_probability", c_double), ("skip_forced", c_int),
+                ("trim_useless", c_int),
                 ("builds", BuildOptions), ("rewards", RewardOptions)]
 
 
@@ -80,6 +81,7 @@ def _declare(library):
         "leekrl_vec_step": (c_int, [c_void_p, POINTER(c_int32)]),
         "leekrl_vec_error": (c_char_p, [c_void_p]),
         "leekrl_build_base": (c_int, [c_int]),
+        "leekrl_vec_action_table": (c_int, [POINTER(c_int32)]),
     }
     for name, (result, arguments) in declarations.items():
         function = getattr(library, name)

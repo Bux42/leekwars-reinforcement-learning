@@ -13,6 +13,23 @@ EPISODE_FIELDS = ("turns", "winner", "decisions_0", "decisions_1", "actions_0", 
                   "life_0", "life_1", "known_0", "known_1", "redrawn")
 
 
+def action_table():
+    """What each action is: array (actions, 4) of kind, item, dx, dy.
+
+    Kinds are END_TURN, MOVE, WEAPON and CHIP, from 0 to 3. The item is its position
+    among the weapons, or the chips, of the observation. dx and dy are relative.
+    """
+    sizes = [ctypes.c_size_t() for _ in range(3)]
+    lib = library()
+    if not lib.leekrl_vec_sizes(*map(ctypes.byref, sizes)):
+        raise RuntimeError("cannot compute the sizes of the environment")
+    table = np.zeros((sizes[0].value, 4), np.int32)
+    if not lib.leekrl_vec_action_table(table.ctypes.data_as(
+            ctypes.POINTER(ctypes.c_int32))):
+        raise RuntimeError("cannot describe the actions")
+    return table
+
+
 class VecEnv:
     """Outputs are arrays overwritten by each step, without any copy:
 
@@ -28,7 +45,8 @@ class VecEnv:
     """
 
     def __init__(self, envs, threads=None, seed=0, known_builds=(), known_probability=None,
-                 skip_forced=None, skew=None, stat_weights=None, rewards=None):
+                 skip_forced=None, trim_useless=None, skew=None, stat_weights=None,
+                 rewards=None):
         self._lib = library()
         self._vec = None
         layout = self._lib.layout
@@ -51,6 +69,8 @@ class VecEnv:
             options.known_probability = known_probability
         if skip_forced is not None:
             options.skip_forced = skip_forced
+        if trim_useless is not None:
+            options.trim_useless = trim_useless
         if skew is not None:
             options.builds.skew = skew
         for stat, weight in (stat_weights or {}).items():

@@ -114,6 +114,16 @@ leekrl_action_status leekrl_action_catalog_mask(const leekrl_action_catalog *cat
                                                 struct LwEntity *actor, uint8_t *mask);
 
 /*
+ * Same, without the casts that cannot affect anything: those whose area holds no
+ * entity any of their effects accepts. Kept: casts with an effect on the caster
+ * whatever the target (a sword's shield), summons, teleports, and every cast of
+ * a caster holding a weapon that reacts to its critical hits.
+ */
+leekrl_action_status leekrl_action_catalog_useful_mask(const leekrl_action_catalog *catalog,
+                                                       struct LwFight *fight,
+                                                       struct LwEntity *actor, uint8_t *mask);
+
+/*
  * Revalidate and execute one action. engine_result receives the generator's
  * result (positive on success) or 0 for END_TURN. END_TURN only signals the
  * caller: end the turn to actually finish it. Summons get an AI and play turns

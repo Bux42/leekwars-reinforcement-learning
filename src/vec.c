@@ -71,6 +71,7 @@ void leekrl_vec_options_init(leekrl_vec_options *options)
     options->threads = 1;
     options->known_probability = 0.01;
     options->skip_forced = 1;
+    options->trim_useless = 1;
     leekrl_build_options_init(&options->builds);
     leekrl_reward_options_init(&options->rewards);
 }
@@ -245,8 +246,10 @@ static int advance(environment *env)
         LwEntity *actor = lw_fight_step_current(&env->fight);
         if (actor) {
             if (!lw_entity_is_dead(actor) && !lw_state_is_finished(&env->state)) {
-                leekrl_action_status status = leekrl_action_catalog_mask(
-                    vec->catalog, &env->fight, actor, env->legal);
+                leekrl_action_status status =
+                    (vec->options.trim_useless ? leekrl_action_catalog_useful_mask
+                                               : leekrl_action_catalog_mask)(
+                        vec->catalog, &env->fight, actor, env->legal);
                 if (status != LEEKRL_ACTION_OK)
                     return fail(env, "cannot compute the mask",
                                 leekrl_action_status_string(status));
@@ -376,6 +379,32 @@ int leekrl_vec_sizes(size_t *actions, size_t *floats, size_t *mask_bytes)
     leekrl_observer_destroy(observer);
     leekrl_action_catalog_destroy(catalog);
     return count != 0;
+}
+
+int leekrl_vec_action_table(int32_t *table)
+{
+    leekrl_action_catalog *catalog = NULL;
+    leekrl_observer *observer;
+    const leekrl_action *actions;
+    size_t i, n;
+    if (!table || leekrl_action_catalog_create_without(leekrl_solo_excluded_items,
+                                                       leekrl_solo_excluded_count, &catalog) !=
+                      LEEKRL_ACTION_OK) return 0;
+    observer = leekrl_observer_create(catalog);
+    actions = leekrl_action_catalog_actions(catalog);
+    n = observer ? leekrl_action_catalog_count(catalog) : 0;
+    for (i = 0; i < n; ++i) {
+        const leekrl_action *a = &actions[i];
+        table[4 * i] = a->kind;
+        table[4 * i + 1] = a->kind == LEEKRL_ACTION_WEAPON
+            ? leekrl_observer_weapon_index(observer, a->item_id)
+            : a->kind == LEEKRL_ACTION_CHIP ? leekrl_observer_chip_index(observer, a->item_id) : -1;
+        table[4 * i + 2] = a->dx;
+        table[4 * i + 3] = a->dy;
+    }
+    leekrl_observer_destroy(observer);
+    leekrl_action_catalog_destroy(catalog);
+    return n != 0;
 }
 
 void leekrl_vec_layout(leekrl_vec_layout_info *layout)

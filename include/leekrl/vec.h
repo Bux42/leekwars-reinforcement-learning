@@ -31,11 +31,13 @@ typedef struct {
     uint64_t seed;
     double known_probability; /* chance of a known build, for each side alone */
     int skip_forced;          /* end turns that have no other legal action */
+    int trim_useless;         /* mask casts that cannot affect anything */
     leekrl_build_options builds;
     leekrl_reward_options rewards;
 } leekrl_vec_options;
 
-/* 1 env, 1 thread, seed 0, 1% of known builds, forced turns skipped. */
+/* 1 env, 1 thread, seed 0, 1% of known builds, forced turns skipped, useless casts
+ * masked. */
 void leekrl_vec_options_init(leekrl_vec_options *options);
 
 /* Figures of a finished fight. */
@@ -85,6 +87,10 @@ size_t leekrl_vec_mask_bytes(const leekrl_vec *vec);
 
 /* Sizes without an environment. 0 if the item snapshot is not registered. */
 int leekrl_vec_sizes(size_t *actions, size_t *floats, size_t *mask_bytes);
+
+/* Describe every action: kind, position of its item among the weapons or chips of
+ * the observation (-1 for none), dx, dy. Holds 4 x actions values. Returns 1 or 0. */
+int leekrl_vec_action_table(int32_t *table);
 
 /* Sizes a binding can compare with its own. */
 typedef struct {

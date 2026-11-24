@@ -85,6 +85,10 @@ if(BUILD_TESTING)
         target_link_libraries(test_reward PRIVATE leekrl)
         add_test(NAME leekwars_reward COMMAND test_reward)
 
+        add_executable(test_useful tests/test_useful.c)
+        target_link_libraries(test_useful PRIVATE leekrl)
+        add_test(NAME leekwars_useful COMMAND test_useful)
+
         add_executable(test_vec tests/test_vec.c)
         target_link_libraries(test_vec PRIVATE leekrl)
         add_test(NAME leekwars_vec COMMAND test_vec)
