@@ -3,7 +3,6 @@
 #include "leekrl/plant_ai.h"
 #include "leekrl/rules.h"
 
-#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,6 +18,8 @@ struct leekrl_battle {
     leekrl_observer *observer;
     leekrl_battle_options options;
     size_t count;
+    leekrl_reward_tracker rewards;
+    float parts[LEEKRL_REWARD_PARTS];
     uint8_t map[LEEKRL_OBS_MAP_CELLS];
     char error[128];
     LwGenerator generator;
@@ -33,10 +34,7 @@ void leekrl_battle_options_init(leekrl_battle_options *options)
     if (!options) return;
     options->max_turns = LW_FIGHT_MAX_TURNS;
     options->max_decisions = 4096;
-    options->win_reward = 1;
-    options->loss_reward = -1;
-    options->draw_reward = 0;
-    options->step_reward = 0;
+    leekrl_reward_options_init(&options->rewards);
 }
 
 static int valid_info(const LwEntityInfo *info)
@@ -73,9 +71,7 @@ leekrl_env_status leekrl_battle_create(const LwEntityInfo *self,
     *out = NULL;
     if (!valid_info(self) || !valid_info(opponent) || self->id == opponent->id ||
         !options || options->max_turns < 1 || options->max_turns > LW_FIGHT_MAX_TURNS ||
-        !options->max_decisions ||
-        !isfinite(options->win_reward) || !isfinite(options->loss_reward) ||
-        !isfinite(options->draw_reward) || !isfinite(options->step_reward))
+        !options->max_decisions || !leekrl_reward_options_valid(&options->rewards))
         return LEEKRL_ENV_INVALID_ARGUMENT;
     battle = calloc(1, sizeof(*battle));
     if (!battle) return LEEKRL_ENV_OUT_OF_MEMORY;
@@ -160,6 +156,11 @@ const char *leekrl_battle_error(const leekrl_battle *battle)
     return battle ? battle->error : "";
 }
 
+const float *leekrl_battle_reward_parts(const leekrl_battle *battle)
+{
+    return battle ? battle->parts : NULL;
+}
+
 int leekrl_battle_life(const leekrl_battle *battle, int team)
 {
     LwEntity *leek = battle && battle->started && (team == 0 || team == 1)
@@ -193,36 +194,36 @@ static int advance(leekrl_battle *battle)
         if (lw_entity_get_team(actor) == 0) return 0;
         if (lw_fight_step_end_turn(battle->fight)) return -1;
     }
-    return lw_fight_step_finish(battle->fight, battle->scenario->draw_check_life);
+    /* Before the end of the fight removes the summons. */
+    leekrl_reward_step(&battle->rewards, &battle->options.rewards, battle->fight, 0,
+                       battle->parts);
+    if (lw_fight_step_finish(battle->fight, battle->scenario->draw_check_life)) return -1;
+    leekrl_reward_end(&battle->rewards, &battle->options.rewards, battle->fight, 0,
+                      battle->parts);
+    return 0;
 }
 
-static int output(leekrl_battle *battle, float *observation, uint8_t *mask,
-                  int *finished, float *reward)
+/* Rewards of a finished fight are already in parts. */
+static int output(leekrl_battle *battle, float *observation, uint8_t *mask, int *finished)
 {
     LwEntity *actor = lw_fight_step_current(battle->fight);
-    size_t count = leekrl_action_catalog_count(battle->catalog);
-    int winner;
     *finished = !actor;
-    *reward = 0;
-    if (actor) {
-        return observe(battle, actor, observation) ||
-               leekrl_action_catalog_mask(battle->catalog, battle->fight, actor,
-                                          mask) != LEEKRL_ACTION_OK;
+    if (!actor) {
+        memset(observation, 0, leekrl_battle_observation_size(battle) * sizeof(*observation));
+        memset(mask, 0, leekrl_action_catalog_count(battle->catalog));
+        return 0;
     }
-    memset(observation, 0, leekrl_battle_observation_size(battle) * sizeof(*observation));
-    memset(mask, 0, count);
-    winner = lw_fight_get_winner(battle->fight);
-    if (winner == 0) *reward = battle->options.win_reward;
-    else if (winner == 1) *reward = battle->options.loss_reward;
-    else *reward = battle->options.draw_reward;
-    return 0;
+    leekrl_reward_step(&battle->rewards, &battle->options.rewards, battle->fight, 0,
+                       battle->parts);
+    return observe(battle, actor, observation) ||
+           leekrl_action_catalog_mask(battle->catalog, battle->fight, actor, mask) !=
+               LEEKRL_ACTION_OK;
 }
 
 static int reset_cb(void *context, uint64_t seed, float *observation, uint8_t *mask)
 {
     leekrl_battle *battle = context;
     int finished;
-    float reward;
     end_fight(battle);
     battle->error[0] = 0;
     battle->scenario->seed = (int)(seed & UINT64_C(0x7fffffff));
@@ -231,8 +232,10 @@ static int reset_cb(void *context, uint64_t seed, float *observation, uint8_t *m
                                       NULL, battle->state, battle->fight,
                                       battle->outcome)) return -1;
     battle->started = 1;
-    return lw_fight_step_start(battle->fight) || advance(battle) ||
-           output(battle, observation, mask, &finished, &reward) || finished;
+    if (lw_fight_step_start(battle->fight)) return -1;
+    leekrl_reward_start(&battle->rewards, &battle->options.rewards, battle->fight);
+    /* What happens before the first decision rewards no action. */
+    return advance(battle) || output(battle, observation, mask, &finished) || finished;
 }
 
 static int step_cb(void *context, size_t action, float *observation, uint8_t *mask,
@@ -248,12 +251,13 @@ static int step_cb(void *context, size_t action, float *observation, uint8_t *ma
     if (leekrl_action_execute(battle->fight, actor, chosen, &engine_result) !=
         LEEKRL_ACTION_OK) return -1;
     ++battle->count;
+    if (chosen->kind != LEEKRL_ACTION_END_TURN) leekrl_reward_count_action(&battle->rewards, 0);
     if (chosen->kind == LEEKRL_ACTION_END_TURN || lw_entity_is_dead(actor) ||
         lw_state_is_finished(battle->state)) {
         if (lw_fight_step_end_turn(battle->fight) || advance(battle)) return -1;
     }
-    if (output(battle, observation, mask, &finished, reward)) return -1;
-    *reward += battle->options.step_reward;
+    if (output(battle, observation, mask, &finished)) return -1;
+    *reward = leekrl_reward_sum(battle->parts);
     *terminated = finished;
     *truncated = !finished && battle->count == battle->options.max_decisions;
     return 0;

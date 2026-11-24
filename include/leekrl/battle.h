@@ -4,6 +4,7 @@
 #include "leekrl/actions.h"
 #include "leekrl/env.h"
 #include "leekrl/observation.h"
+#include "leekrl/reward.h"
 #include "lw_entity_info.h"
 
 #ifdef __cplusplus
@@ -15,15 +16,11 @@ typedef struct leekrl_battle leekrl_battle;
 typedef struct {
     int max_turns;
     size_t max_decisions;
-    float win_reward;
-    float loss_reward;
-    float draw_reward;
-    float step_reward;
+    leekrl_reward_options rewards;
 } leekrl_battle_options;
 
 /*
- * Initialize defaults: 64 turns, 4096 decisions,
- * terminal rewards +1/-1/0, and zero reward per step.
+ * Initialize defaults: 64 turns, 4096 decisions, rewards of reward.h.
  */
 void leekrl_battle_options_init(leekrl_battle_options *options);
 
@@ -54,6 +51,9 @@ void leekrl_battle_destroy(leekrl_battle *battle);
 leekrl_env_callbacks leekrl_battle_callbacks(void);
 size_t leekrl_battle_observation_size(const leekrl_battle *battle);
 const leekrl_observer *leekrl_battle_observer(const leekrl_battle *battle);
+
+/* Parts of the last reward, LEEKRL_REWARD_PARTS floats. */
+const float *leekrl_battle_reward_parts(const leekrl_battle *battle);
 
 /* Why the last reset or step failed, if the situation could not be observed. */
 const char *leekrl_battle_error(const leekrl_battle *battle);

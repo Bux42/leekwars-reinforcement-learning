@@ -194,22 +194,20 @@ int main(void)
     leekrl_battle_destroy(battle);
 
     options.max_decisions = 1;
-    options.step_reward = 0.25f;
     CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) == LEEKRL_ENV_OK);
     CHECK(leekrl_env_create(leekrl_battle_observation_size(battle),
                             leekrl_action_catalog_count(leekrl_battle_catalog(battle)),
                             leekrl_battle_callbacks(), battle, &env) == LEEKRL_ENV_OK);
     CHECK(leekrl_env_reset(env, 123) == LEEKRL_ENV_OK);
     CHECK(leekrl_env_step(env, 0, &result) == LEEKRL_ENV_OK);
-    CHECK(!result.terminated && result.truncated && result.reward == 0.25f);
+    CHECK(!result.terminated && result.truncated && result.reward == 0);
     CHECK(leekrl_env_action_mask(env)[0]);
     leekrl_env_destroy(env);
     leekrl_battle_destroy(battle);
 
     options.max_decisions = 10;
     options.max_turns = 1;
-    options.step_reward = 0;
-    options.draw_reward = 0.5f;
+    options.rewards.draw = 0.5f;
     CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) == LEEKRL_ENV_OK);
     CHECK(leekrl_env_create(leekrl_battle_observation_size(battle),
                             leekrl_action_catalog_count(leekrl_battle_catalog(battle)),
@@ -230,7 +228,9 @@ int main(void)
     self.n_chips = 0;
     options.max_decisions = 10;
     options.max_turns = 2;
-    options.win_reward = 2;
+    options.rewards.win = 2;
+    options.rewards.life = options.rewards.total_life = 0;
+    options.rewards.duration = options.rewards.actions = 0;
     CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) == LEEKRL_ENV_OK);
     catalog = leekrl_battle_catalog(battle);
     n = leekrl_action_catalog_count(catalog);

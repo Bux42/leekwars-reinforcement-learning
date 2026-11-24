@@ -73,7 +73,8 @@ plants. Over a whole fight, the two sides' totals are opposite.
 
 These rewards add up to the final `D` minus the initial one (0), so about -0.56 to +0.56
 whatever happened in the middle: 0.40 for a leek at full life and 0.16 for 8 summons.
-Vitality effects, which raise total life, can exceed it.
+Vitality effects, which raise total life, can exceed it: the largest difference at the
+end of 1,000 random fights was 0.89.
 
 ### End of the fight
 

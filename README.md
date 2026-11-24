@@ -133,8 +133,8 @@ Observations follow `specs/Observation.md` and are written by
 environment only handles floats, so the battle appends the map as floats. A
 situation the layout cannot represent fails the step: see `leekrl_battle_error`.
 
-Rewards default to +1 win, -1 loss, 0 draw and 0 per decision. Options allow
-changing these values; no damage-based shaping is implemented. Turn-limit
+Rewards follow `specs/Rewards.md` and are written by `leekrl/reward.h`; the parts of
+the last one are available with `leekrl_battle_reward_parts`. Turn-limit
 draws terminate; a configurable decision limit truncates with a valid final
 observation and mask for bootstrapping. Seeds use their low 31 bits.
 

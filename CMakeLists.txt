@@ -12,6 +12,7 @@ add_library(leekrl STATIC
     src/observation.c
     src/plant_ai.c
     src/ppo.c
+    src/reward.c
     src/rules.c
 )
 target_include_directories(leekrl PUBLIC
@@ -76,6 +77,10 @@ if(BUILD_TESTING)
         add_executable(test_observation tests/test_observation.c)
         target_link_libraries(test_observation PRIVATE leekrl)
         add_test(NAME leekwars_observation COMMAND test_observation)
+
+        add_executable(test_reward tests/test_reward.c)
+        target_link_libraries(test_reward PRIVATE leekrl)
+        add_test(NAME leekwars_reward COMMAND test_reward)
     endif()
 endif()
 
