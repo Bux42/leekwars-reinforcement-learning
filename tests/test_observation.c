@@ -359,7 +359,7 @@ static void test_random_fights(int fights)
                     CHECK(!memcmp(o, again, sizeof(*o)));
                     CHECK(s->state.rng_n == rng_before);
                 }
-                /* The generator keeps dead summons, and stops at 64 entities. */
+                /* The generator keeps dead summons, and stops at its entity limit. */
                 if (s->state.n_entities == LW_STATE_MAX_ENTITIES) break;
                 if (++plays > 12) break;
                 CHECK(leekrl_action_catalog_mask(catalog, &s->fight, actor, mask) ==
@@ -391,7 +391,7 @@ static void test_random_fights(int fights)
         lw_scenario_dispose(&s->scenario);
     }
     printf("%ld observations checked (%ld by summons), %ld effects, %ld entities in a state, "
-           "%ld plants, %ld with a weapon in hand, %ld fights stopped at 64 entities, up to %d alive\n", seen.decisions,
+           "%ld plants, %ld with a weapon in hand, %ld fights stopped at the entity limit, up to %d alive\n", seen.decisions,
            seen.summons, seen.effects, seen.states, seen.plants, seen.in_hand, seen.full,
            seen.most_entities);
     CHECK(seen.summons && seen.effects && seen.states && seen.plants && seen.in_hand);
