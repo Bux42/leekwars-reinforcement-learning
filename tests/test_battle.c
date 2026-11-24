@@ -1,10 +1,11 @@
 #include "leekrl/battle.h"
 #include "leekrl/collect.h"
-#include "leekrl/grid.h"
+#include "leekrl/observation.h"
 #include "lw_chip.h"
 #include "lw_effect_params.h"
 #include "lw_weapon.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,18 @@ static void init_entity(LwEntityInfo *info, int id)
     info->mp = 3;
     info->ram = 10;
     info->level = 1;
+}
+
+/* Values of the acting entity, unscaled. */
+static int self_value(leekrl_env *env, int offset, int scale)
+{
+    float value = leekrl_env_observation(env)[LEEKRL_OBS_ENTITIES + offset] * (float)scale;
+    return (int)(value + 0.5f);
+}
+
+static int turn_of(leekrl_env *env)
+{
+    return (int)(leekrl_env_observation(env)[LEEKRL_OBS_TURN] * 64 + 0.5f);
 }
 
 static size_t find_action(leekrl_env *env, const leekrl_action_catalog *catalog,
@@ -85,16 +98,17 @@ int main(void)
     self.n_chips = 1;
     leekrl_battle_options_init(&options);
     options.max_turns = 3;
-    options.grid_radius = 4;
     CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) == LEEKRL_ENV_OK);
     catalog = leekrl_battle_catalog(battle);
     n = leekrl_action_catalog_count(catalog);
     obs_size = leekrl_battle_observation_size(battle);
-    CHECK(n > 5 && obs_size > LEEKRL_BATTLE_GRID);
+    CHECK(n > 5 && obs_size == LEEKRL_OBS_ITEMS + 2 * (2 * 2 + 2 * 1) + 3 +
+                               LEEKRL_OBS_MAP_CELLS);
     CHECK(leekrl_env_create(obs_size, n, leekrl_battle_callbacks(), battle, &env) ==
           LEEKRL_ENV_OK);
     CHECK(leekrl_env_reset(env, 123) == LEEKRL_ENV_OK);
-    CHECK(leekrl_env_observation(env)[LEEKRL_BATTLE_SELF_LIFE] == 100);
+    CHECK(leekrl_env_observation(env)[LEEKRL_OBS_ENTITIES + LEEKRL_OBS_LIFE] == 1);
+    CHECK(leekrl_battle_life(battle, 0) == 100 && leekrl_battle_life(battle, 1) == 100);
     CHECK(leekrl_env_action_mask(env)[0]);
     check_unequipped(env, catalog, LEEKRL_ACTION_WEAPON, 102);
     {
@@ -123,23 +137,23 @@ int main(void)
         self.weapons[0] = 101;
         self.n_chips = 1;
     }
-    turn = (int)leekrl_env_observation(env)[LEEKRL_BATTLE_TURN];
+    turn = turn_of(env);
     history[0] = find_action(env, catalog, LEEKRL_ACTION_MOVE, 0);
     CHECK(history[0] < n);
     CHECK(leekrl_env_step(env, history[0], &result) == LEEKRL_ENV_OK);
     CHECK(!result.terminated && !result.truncated && result.reward == 0);
-    CHECK((int)leekrl_env_observation(env)[LEEKRL_BATTLE_TURN] == turn);
-    CHECK(leekrl_env_observation(env)[LEEKRL_BATTLE_MP] == 2);
+    CHECK(turn_of(env) == turn);
+    CHECK(self_value(env, LEEKRL_OBS_MP, 15) == 2);
     history[1] = find_action(env, catalog, LEEKRL_ACTION_WEAPON, 101);
     CHECK(history[1] < n);
     CHECK(leekrl_env_step(env, history[1], &result) == LEEKRL_ENV_OK);
-    CHECK(!result.terminated && (int)leekrl_env_observation(env)[LEEKRL_BATTLE_TURN] == turn);
-    CHECK(leekrl_env_observation(env)[LEEKRL_BATTLE_TP] == 7);
+    CHECK(!result.terminated && turn_of(env) == turn);
+    CHECK(self_value(env, LEEKRL_OBS_TP, 30) == 7);
     history[2] = find_action(env, catalog, LEEKRL_ACTION_CHIP, 201);
     CHECK(history[2] < n);
     CHECK(leekrl_env_step(env, history[2], &result) == LEEKRL_ENV_OK);
-    CHECK(!result.terminated && (int)leekrl_env_observation(env)[LEEKRL_BATTLE_TURN] == turn);
-    CHECK(leekrl_env_observation(env)[LEEKRL_BATTLE_TP] == 5);
+    CHECK(!result.terminated && turn_of(env) == turn);
+    CHECK(self_value(env, LEEKRL_OBS_TP, 30) == 5);
     CHECK(!leekrl_env_action_mask(env)[history[2]]);
     snapshot = malloc(obs_size * sizeof(*snapshot));
     mask = malloc(n);
@@ -151,8 +165,8 @@ int main(void)
     CHECK(memcmp(snapshot, leekrl_env_observation(env), obs_size * sizeof(*snapshot)) == 0);
     CHECK(memcmp(mask, leekrl_env_action_mask(env), n) == 0);
     CHECK(leekrl_env_step(env, 0, &result) == LEEKRL_ENV_OK);
-    CHECK(!result.terminated && leekrl_env_observation(env)[LEEKRL_BATTLE_TURN] > turn);
-    CHECK(leekrl_env_observation(env)[LEEKRL_BATTLE_MP] == 3);
+    CHECK(!result.terminated && turn_of(env) > turn);
+    CHECK(self_value(env, LEEKRL_OBS_MP, 15) == 3);
     {
         lr_ppo *model = NULL;
         lr_trajectory *trajectory = NULL;
@@ -216,7 +230,6 @@ int main(void)
     self.n_chips = 0;
     options.max_decisions = 10;
     options.max_turns = 2;
-    options.grid_radius = 32;
     options.win_reward = 2;
     CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) == LEEKRL_ENV_OK);
     catalog = leekrl_battle_catalog(battle);
@@ -225,20 +238,17 @@ int main(void)
                             leekrl_battle_callbacks(), battle, &env) == LEEKRL_ENV_OK);
     CHECK(leekrl_env_reset(env, 123) == LEEKRL_ENV_OK);
     {
-        const float *grid = leekrl_env_observation(env) + LEEKRL_BATTLE_GRID;
+        const float *entity = leekrl_env_observation(env) + LEEKRL_OBS_ENTITIES +
+                              LEEKRL_OBS_ENTITY_SIZE;
         const leekrl_action *actions = leekrl_action_catalog_actions(catalog);
         const uint8_t *legal = leekrl_env_action_mask(env);
-        size_t cell, target = 65u * 65u, selected = n;
-        int dx, dy;
-        for (cell = 0; cell < 65u * 65u; ++cell) {
-            if (grid[LEEKRL_GRID_ENEMY * 65u * 65u + cell] == 1) {
-                target = cell;
-                break;
-            }
-        }
-        CHECK(target < 65u * 65u);
-        dx = (int)(target % 65u) - 32;
-        dy = (int)(target / 65u) - 32;
+        size_t selected = n;
+        int dx = (int)lround(entity[LEEKRL_OBS_DX] * LEEKRL_OBS_MAP_RADIUS);
+        int dy = (int)lround(entity[LEEKRL_OBS_DY] * LEEKRL_OBS_MAP_RADIUS);
+        CHECK(entity[LEEKRL_OBS_PRESENT] == 1 && entity[LEEKRL_OBS_ALLY] == 0);
+        CHECK(leekrl_env_observation(env)[leekrl_battle_observation_size(battle) -
+              LEEKRL_OBS_MAP_CELLS + (size_t)leekrl_obs_map_index(dx, dy)] ==
+              LEEKRL_CELL_ENEMY_LEEK);
         for (i = 0; i < n; ++i) {
             if (actions[i].kind == LEEKRL_ACTION_WEAPON && actions[i].item_id == 103 &&
                 actions[i].dx == dx && actions[i].dy == dy && legal[i]) {
@@ -249,7 +259,8 @@ int main(void)
         CHECK(selected < n);
         CHECK(leekrl_env_step(env, selected, &result) == LEEKRL_ENV_OK);
         CHECK(result.terminated && !result.truncated && result.reward == 2);
-        CHECK(leekrl_env_observation(env)[LEEKRL_BATTLE_ENEMY_LIFE] <= 0);
+        CHECK(leekrl_battle_life(battle, 1) <= 0 && leekrl_battle_life(battle, 0) == 100);
+        CHECK(leekrl_env_observation(env)[LEEKRL_OBS_ENTITIES + LEEKRL_OBS_PRESENT] == 0);
         CHECK(!leekrl_env_action_mask(env)[0]);
     }
     leekrl_env_destroy(env);

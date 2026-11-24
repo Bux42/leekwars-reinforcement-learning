@@ -1,6 +1,7 @@
 # Observation (1v1, first version)
 
-What the environment gives the agent at each decision. Nothing here is coded yet.
+What the environment gives the agent at each decision. Implemented in
+[observation.h](../include/leekrl/observation.h).
 The reasons for the debatable choices are in [adr/observation.md](../adr/observation.md).
 
 The point of view is always that of the **acting entity**: the leek or summon
@@ -74,7 +75,7 @@ Each block:
 | 18 | 1 | `dx` from the acting entity | / 34 |
 | 19 | 1 | `dy` from the acting entity | / 34 |
 | 20 | 1 | Distance from the acting entity | / 34 |
-| 21 | 1 | Available TP | / 30 |
+| 21 | 1 | Available TP. Total TP for awakening plants, which recover it when they awaken | / 30 |
 | 22 | 1 | Total TP | / 30 |
 | 23 | 1 | Available MP | / 15 |
 | 24 | 1 | Total MP | / 15 |
@@ -157,6 +158,11 @@ For each item with a limited number of uses per turn: uses left for the acting e
 have the item. Other entities have no such floats: their uses reset before they play
 again.
 
+## End of the fight
+
+The observation is all zeros once the fight is over. It must not be used to estimate
+a value: a finished fight has none.
+
 ## Safety checks
 
 The environment must fail with an error, never silently drop information, if:
@@ -180,13 +186,16 @@ and trained models no longer fit.
 - **Summoner of a summon.** Obvious in 1v1, needed in team fights.
 - **Dead entities.** Needed with [resurrection](postponed/resurrection.md).
 
-## Checks to write
+## Checks
+
+In [test_observation.c](../tests/test_observation.c):
 
 1. Offsets and sizes match this document.
 2. Translation: moving a whole situation elsewhere on the map changes only the cells
    outside the map.
 3. Symmetry: the same situation seen by each team swaps ally and enemy.
-4. Order: acting entity first, others in real turn order, over random fights.
-5. Effects and states compared with the engine's lists, permanent ones included.
-6. Same seed and actions give byte-identical observations.
-7. Speed: the prototype's grid takes about 4 us; this one should stay of that order.
+4. Random fights: every value compared with an independent reading of the engine,
+   turn order included.
+5. Effects and states, permanent ones included.
+6. Situations that must be refused.
+7. Same seed and actions give byte-identical observations.

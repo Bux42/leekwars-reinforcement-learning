@@ -3,6 +3,7 @@
 
 #include "leekrl/actions.h"
 #include "leekrl/env.h"
+#include "leekrl/observation.h"
 #include "lw_entity_info.h"
 
 #ifdef __cplusplus
@@ -14,24 +15,14 @@ typedef struct leekrl_battle leekrl_battle;
 typedef struct {
     int max_turns;
     size_t max_decisions;
-    int grid_radius;
     float win_reward;
     float loss_reward;
     float draw_reward;
     float step_reward;
 } leekrl_battle_options;
 
-enum {
-    LEEKRL_BATTLE_TURN,
-    LEEKRL_BATTLE_SELF_LIFE,
-    LEEKRL_BATTLE_ENEMY_LIFE,
-    LEEKRL_BATTLE_TP,
-    LEEKRL_BATTLE_MP,
-    LEEKRL_BATTLE_GRID
-};
-
 /*
- * Initialize defaults: 64 turns, 4096 decisions, grid radius 17,
+ * Initialize defaults: 64 turns, 4096 decisions,
  * terminal rewards +1/-1/0, and zero reward per step.
  */
 void leekrl_battle_options_init(leekrl_battle_options *options);
@@ -49,7 +40,10 @@ void leekrl_battle_options_init(leekrl_battle_options *options);
  * is. Awakening plants are scripted (plant_ai.h), for both sides. The fight
  * stays suspended between steps, so a step only executes its own action. The
  * fixed catalog is independent of equipped items. The decision limit truncates
- * rather than ends the fight. Gym wrapper owns neither the context nor its
+ * rather than ends the fight.
+ *
+ * The observation is that of observation.h: the floats, then the map categories
+ * as floats. It is all zeros once the fight is over. Gym wrapper owns neither the context nor its
  * catalog. Destroy wrapper before context.
  */
 leekrl_env_status leekrl_battle_create(const LwEntityInfo *self,
@@ -59,6 +53,13 @@ leekrl_env_status leekrl_battle_create(const LwEntityInfo *self,
 void leekrl_battle_destroy(leekrl_battle *battle);
 leekrl_env_callbacks leekrl_battle_callbacks(void);
 size_t leekrl_battle_observation_size(const leekrl_battle *battle);
+const leekrl_observer *leekrl_battle_observer(const leekrl_battle *battle);
+
+/* Why the last reset or step failed, if the situation could not be observed. */
+const char *leekrl_battle_error(const leekrl_battle *battle);
+
+/* Life of the leek of team 0 (learner) or 1 (opponent), also after the fight. */
+int leekrl_battle_life(const leekrl_battle *battle, int team);
 const leekrl_action_catalog *leekrl_battle_catalog(const leekrl_battle *battle);
 
 #ifdef __cplusplus

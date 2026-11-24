@@ -1,7 +1,7 @@
 #include "leekrl/actions.h"
 #include "leekrl/battle.h"
 #include "leekrl/collect.h"
-#include "leekrl/grid.h"
+#include "leekrl/observation.h"
 #include "leekrl/item_snapshot.h"
 #include "leekrl/rules.h"
 #include "lw_bulb_template.h"
@@ -110,7 +110,6 @@ static void check_build(void)
     self.n_chips = 1;
     leekrl_battle_options_init(&options);
     options.max_turns = 2;
-    options.grid_radius = 4;
     CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) == LEEKRL_ENV_OK);
     catalog = leekrl_battle_catalog(battle);
     n = leekrl_action_catalog_count(catalog);
@@ -137,7 +136,7 @@ static void check_build(void)
     CHECK(devil_count == 1 && sword_count == 4 && sword_legal > 0);
     CHECK(leekrl_env_step(env, devil_index, &result) == LEEKRL_ENV_OK);
     CHECK(!result.terminated && !result.truncated);
-    CHECK(leekrl_env_observation(env)[LEEKRL_BATTLE_TP] == 4);
+    CHECK(leekrl_env_observation(env)[LEEKRL_OBS_ENTITIES + LEEKRL_OBS_TP] == 4.0f / 30);
     mask = leekrl_env_action_mask(env);
     CHECK(!mask[devil_index]);
     for (i = 0; i < n; ++i)
@@ -178,8 +177,8 @@ static void check_summon(void)
     const leekrl_action_catalog *catalog;
     const leekrl_action *actions;
     const uint8_t *mask;
-    const float *grid;
-    size_t i, n, selected, allies = 0, side;
+    const float *map;
+    size_t i, n, selected, allies = 0;
     CHECK(lw_bulbs_get_invocation_template(1));
     init_entity(&self, 1);
     init_entity(&opponent, 2);
@@ -187,7 +186,6 @@ static void check_summon(void)
     self.n_chips = 1;
     leekrl_battle_options_init(&options);
     options.max_turns = 2;
-    options.grid_radius = 4;
     CHECK(leekrl_battle_create(&self, &opponent, &options, &battle) == LEEKRL_ENV_OK);
     catalog = leekrl_battle_catalog(battle);
     n = leekrl_action_catalog_count(catalog);
@@ -203,10 +201,9 @@ static void check_summon(void)
     CHECK(leekrl_env_step(env, selected, &result) == LEEKRL_ENV_OK);
     CHECK(!result.terminated && !result.truncated);
     CHECK(!leekrl_env_action_mask(env)[selected]);
-    grid = leekrl_env_observation(env) + LEEKRL_BATTLE_GRID;
-    side = (size_t)(2 * options.grid_radius + 1);
-    for (i = 0; i < side * side; ++i)
-        allies += grid[LEEKRL_GRID_ALLY * side * side + i] == 1;
+    map = leekrl_env_observation(env) + leekrl_battle_observation_size(battle) -
+          LEEKRL_OBS_MAP_CELLS;
+    for (i = 0; i < LEEKRL_OBS_MAP_CELLS; ++i) allies += map[i] == LEEKRL_CELL_ALLY_SUMMON;
     CHECK(allies == 1);
     leekrl_env_destroy(env);
     leekrl_battle_destroy(battle);

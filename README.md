@@ -128,13 +128,10 @@ Gym wrapper with `leekrl_battle_observation_size`, the count from
 Different builds can use separate battle contexts with the same item
 registries and therefore the same action indices.
 
-Observations begin with turn, own life, opponent life, TP and MP. The remaining
-floats form a channel-major, actor-centered grid described in `leekrl/grid.h`:
-boundary, obstacle, self, living allies, living enemies and dead entities.
-Rows and columns are relative generator coordinates, with the actor at the
-center. Radius is configurable; default 17. This is not a complete state
-representation: detailed stats, effects, cooldown values and equipment are
-not yet observation features.
+Observations follow `specs/Observation.md` and are written by
+`leekrl/observation.h`: floats, and one category byte per map cell. The generic
+environment only handles floats, so the battle appends the map as floats. A
+situation the layout cannot represent fails the step: see `leekrl_battle_error`.
 
 Rewards default to +1 win, -1 loss, 0 draw and 0 per decision. Options allow
 changing these values; no damage-based shaping is implemented. Turn-limit

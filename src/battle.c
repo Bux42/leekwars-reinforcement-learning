@@ -1,5 +1,5 @@
 #include "leekrl/battle.h"
-#include "leekrl/grid.h"
+#include "leekrl/observation.h"
 #include "leekrl/plant_ai.h"
 #include "leekrl/rules.h"
 
@@ -16,9 +16,11 @@
 struct leekrl_battle {
     LwScenario *scenario;
     leekrl_action_catalog *catalog;
+    leekrl_observer *observer;
     leekrl_battle_options options;
     size_t count;
-    size_t observation_size;
+    uint8_t map[LEEKRL_OBS_MAP_CELLS];
+    char error[128];
     LwGenerator generator;
     LwState *state;
     LwFight *fight;
@@ -31,7 +33,6 @@ void leekrl_battle_options_init(leekrl_battle_options *options)
     if (!options) return;
     options->max_turns = LW_FIGHT_MAX_TURNS;
     options->max_decisions = 4096;
-    options->grid_radius = 17;
     options->win_reward = 1;
     options->loss_reward = -1;
     options->draw_reward = 0;
@@ -68,8 +69,6 @@ leekrl_env_status leekrl_battle_create(const LwEntityInfo *self,
 {
     leekrl_battle *battle;
     leekrl_action_status status;
-    size_t grid_size;
-    leekrl_grid_layout layout;
     if (!out) return LEEKRL_ENV_INVALID_ARGUMENT;
     *out = NULL;
     if (!valid_info(self) || !valid_info(opponent) || self->id == opponent->id ||
@@ -78,16 +77,9 @@ leekrl_env_status leekrl_battle_create(const LwEntityInfo *self,
         !isfinite(options->win_reward) || !isfinite(options->loss_reward) ||
         !isfinite(options->draw_reward) || !isfinite(options->step_reward))
         return LEEKRL_ENV_INVALID_ARGUMENT;
-    if (leekrl_grid_layout_for(options->grid_radius, &layout) != LEEKRL_GRID_OK ||
-        layout.width > SIZE_MAX / layout.height ||
-        layout.width * layout.height > SIZE_MAX / layout.channels)
-        return LEEKRL_ENV_INVALID_ARGUMENT;
-    grid_size = layout.width * layout.height * layout.channels;
-    if (grid_size > SIZE_MAX - LEEKRL_BATTLE_GRID) return LEEKRL_ENV_INVALID_ARGUMENT;
     battle = calloc(1, sizeof(*battle));
     if (!battle) return LEEKRL_ENV_OUT_OF_MEMORY;
     battle->options = *options;
-    battle->observation_size = LEEKRL_BATTLE_GRID + grid_size;
     battle->scenario = calloc(1, sizeof(*battle->scenario));
     battle->state = calloc(1, sizeof(*battle->state));
     battle->fight = calloc(1, sizeof(*battle->fight));
@@ -113,6 +105,11 @@ leekrl_env_status leekrl_battle_create(const LwEntityInfo *self,
         return status == LEEKRL_ACTION_OUT_OF_MEMORY ? LEEKRL_ENV_OUT_OF_MEMORY :
                LEEKRL_ENV_INVALID_ARGUMENT;
     }
+    battle->observer = leekrl_observer_create(battle->catalog);
+    if (!battle->observer) {
+        leekrl_battle_destroy(battle);
+        return LEEKRL_ENV_OUT_OF_MEMORY;
+    }
     *out = battle;
     return LEEKRL_ENV_OK;
 }
@@ -131,21 +128,12 @@ void leekrl_battle_destroy(leekrl_battle *battle)
         lw_scenario_dispose(battle->scenario);
         free(battle->scenario);
     }
+    leekrl_observer_destroy(battle->observer);
     leekrl_action_catalog_destroy(battle->catalog);
     free(battle->state);
     free(battle->fight);
     free(battle->outcome);
     free(battle);
-}
-
-size_t leekrl_battle_observation_size(const leekrl_battle *battle)
-{
-    return battle ? battle->observation_size : 0;
-}
-
-const leekrl_action_catalog *leekrl_battle_catalog(const leekrl_battle *battle)
-{
-    return battle ? battle->catalog : NULL;
 }
 
 static LwEntity *find_entity(LwState *state, int id)
@@ -157,25 +145,41 @@ static LwEntity *find_entity(LwState *state, int id)
     return NULL;
 }
 
-static int observe(leekrl_battle *battle, LwEntity *actor, float *o)
+size_t leekrl_battle_observation_size(const leekrl_battle *battle)
 {
-    LwState *state = battle->state;
-    LwEntity *enemy = find_entity(state, battle->scenario->entities[1][0].id);
-    size_t required;
-    o[LEEKRL_BATTLE_TURN] = (float)lw_state_get_turn(state);
-    o[LEEKRL_BATTLE_SELF_LIFE] = actor ? (float)lw_entity_get_life(actor) : 0;
-    o[LEEKRL_BATTLE_ENEMY_LIFE] = enemy ? (float)lw_entity_get_life(enemy) : 0;
-    o[LEEKRL_BATTLE_TP] = actor ? (float)lw_entity_get_tp(actor) : 0;
-    o[LEEKRL_BATTLE_MP] = actor ? (float)lw_entity_get_mp(actor) : 0;
-    if (!actor || !lw_entity_get_cell(actor)) {
-        memset(o + LEEKRL_BATTLE_GRID, 0,
-               (battle->observation_size - LEEKRL_BATTLE_GRID) * sizeof(*o));
-        return 0;
-    }
-    return leekrl_grid_observation(battle->fight, actor, battle->options.grid_radius,
-                                   o + LEEKRL_BATTLE_GRID,
-                                   battle->observation_size - LEEKRL_BATTLE_GRID,
-                                   &required) != LEEKRL_GRID_OK;
+    return battle ? leekrl_observer_float_count(battle->observer) + LEEKRL_OBS_MAP_CELLS : 0;
+}
+
+const leekrl_observer *leekrl_battle_observer(const leekrl_battle *battle)
+{
+    return battle ? battle->observer : NULL;
+}
+
+const char *leekrl_battle_error(const leekrl_battle *battle)
+{
+    return battle ? battle->error : "";
+}
+
+int leekrl_battle_life(const leekrl_battle *battle, int team)
+{
+    LwEntity *leek = battle && battle->started && (team == 0 || team == 1)
+        ? find_entity(battle->state, battle->scenario->entities[team][0].id) : NULL;
+    return leek ? lw_entity_get_life(leek) : 0;
+}
+
+const leekrl_action_catalog *leekrl_battle_catalog(const leekrl_battle *battle)
+{
+    return battle ? battle->catalog : NULL;
+}
+
+/* The generic environment only knows floats: the map follows as floats. */
+static int observe(leekrl_battle *battle, LwEntity *actor, float *out)
+{
+    size_t i, n = leekrl_observer_float_count(battle->observer);
+    if (!leekrl_observe(battle->observer, battle->fight, actor, out, battle->map,
+                        battle->error, sizeof(battle->error))) return -1;
+    for (i = 0; i < LEEKRL_OBS_MAP_CELLS; ++i) out[n + i] = (float)battle->map[i];
+    return 0;
 }
 
 /* Play turns until the learner's team has a decision to make, or the fight is
@@ -205,8 +209,7 @@ static int output(leekrl_battle *battle, float *observation, uint8_t *mask,
                leekrl_action_catalog_mask(battle->catalog, battle->fight, actor,
                                           mask) != LEEKRL_ACTION_OK;
     }
-    actor = find_entity(battle->state, battle->scenario->entities[0][0].id);
-    if (observe(battle, actor, observation)) return -1;
+    memset(observation, 0, leekrl_battle_observation_size(battle) * sizeof(*observation));
     memset(mask, 0, count);
     winner = lw_fight_get_winner(battle->fight);
     if (winner == 0) *reward = battle->options.win_reward;
@@ -221,6 +224,7 @@ static int reset_cb(void *context, uint64_t seed, float *observation, uint8_t *m
     int finished;
     float reward;
     end_fight(battle);
+    battle->error[0] = 0;
     battle->scenario->seed = (int)(seed & UINT64_C(0x7fffffff));
     battle->count = 0;
     if (lw_generator_prepare_scenario(&battle->generator, battle->scenario, NULL, NULL,

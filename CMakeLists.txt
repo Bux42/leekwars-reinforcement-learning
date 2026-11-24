@@ -8,8 +8,8 @@ add_library(leekrl STATIC
     src/battle.c
     src/collect.c
     src/env.c
-    src/grid.c
     src/leekwars.c
+    src/observation.c
     src/plant_ai.c
     src/ppo.c
     src/rules.c
@@ -49,10 +49,6 @@ if(BUILD_TESTING)
     target_link_libraries(test_actions PRIVATE leekrl)
     add_test(NAME leekwars_actions COMMAND test_actions)
 
-    add_executable(test_grid tests/test_grid.c)
-    target_link_libraries(test_grid PRIVATE leekrl)
-    add_test(NAME leekwars_grid COMMAND test_grid)
-
     add_executable(test_battle tests/test_battle.c)
     target_link_libraries(test_battle PRIVATE leekrl)
     add_test(NAME leekwars_battle COMMAND test_battle)
@@ -76,6 +72,10 @@ if(BUILD_TESTING)
         add_executable(test_build tests/test_build.c)
         target_link_libraries(test_build PRIVATE leekrl)
         add_test(NAME leekwars_build COMMAND test_build)
+
+        add_executable(test_observation tests/test_observation.c)
+        target_link_libraries(test_observation PRIVATE leekrl)
+        add_test(NAME leekwars_observation COMMAND test_observation)
     endif()
 endif()
 
