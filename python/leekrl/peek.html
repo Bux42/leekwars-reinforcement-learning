@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent peek</title>
+<style>
+:root {
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+  --line: #e1e0d9; --free: #efeee9; --wall: #898781; --ally: #2a78d6; --enemy: #eb6834;
+  --heat: #184f95; --good: #006300; --bad: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+    --line: #2c2c2a; --free: #262624; --wall: #5d5c58; --ally: #3987e5; --enemy: #d95926;
+    --heat: #9ec5f4; --good: #0ca30c; --bad: #e66767;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.4 system-ui, sans-serif; }
+header, main { padding: 12px 16px; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+h1 { font-size: 16px; margin: 0; }
+button, select, input[type=search] { font: inherit; color: inherit; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
+button { cursor: pointer; }
+button[aria-pressed=true], button[aria-selected=true] { border-color: var(--ink); font-weight: 600; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--ally); }
+#scrub { flex: 1; min-width: 160px; }
+main { display: grid; grid-template-columns: minmax(340px, 1.1fr) minmax(340px, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+section { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+svg { display: block; width: 100%; height: auto; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.legend { color: var(--ink2); font-size: 12px; }
+.legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin: 0 4px 0 10px; vertical-align: -1px; }
+.facts { display: flex; flex-wrap: wrap; gap: 4px 20px; margin-bottom: 8px; }
+.facts b { font-variant-numeric: tabular-nums; }
+.facts span { color: var(--ink2); }
+.act { display: grid; grid-template-columns: 60px 1fr 120px; gap: 8px; align-items: center; padding: 2px 4px; border-radius: 4px; width: 100%; }
+.act.chosen { outline: 2px solid var(--ink); }
+.act .p { text-align: right; font-variant-numeric: tabular-nums; }
+.act .bar { height: 10px; background: var(--ally); border-radius: 0 4px 4px 0; min-width: 1px; }
+.act:hover { background: var(--free); }
+.entity { border-left: 4px solid var(--ally); padding: 4px 8px; margin: 8px 0; }
+.entity.enemy { border-color: var(--enemy); }
+.entity h3 { font-size: 14px; margin: 0 0 2px; }
+.small { color: var(--ink2); font-size: 12px; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+td, th { text-align: left; padding: 2px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.good { color: var(--good); } .bad { color: var(--bad); }
+.scroll { max-height: 560px; overflow: auto; }
+#tip { position: fixed; pointer-events: none; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 8px; font-size: 12px; display: none; max-width: 260px; z-index: 2; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <select id="fight" aria-label="Fight"></select>
+  <button id="prev">◀</button>
+  <button id="next">▶</button>
+  <button id="play" aria-pressed="false">Play</button>
+  <input id="scrub" type="range" min="0" value="0" aria-label="Decision">
+  <span id="where"></span>
+</header>
+<main>
+  <section>
+    <div class="row">
+      <button id="fixed" aria-pressed="true">Fixed map</button>
+      <button id="centered" aria-pressed="false">As the network sees it</button>
+      <select id="overlay" aria-label="Probabilities shown"></select>
+    </div>
+    <svg id="board" role="img" aria-label="Map seen by the agent"></svg>
+    <p class="legend" id="legend"></p>
+    <p class="legend">Letters: L leek, others are summons. ◎ acting entity, thick outline: chosen target.
+      Blue and orange are the acting entity's allies and enemies, so they swap when the team changes.
+      Keys: ← → one decision, ↑ ↓ one turn.</p>
+  </section>
+  <section>
+    <div class="row" role="tablist" id="tabs"></div>
+    <div id="panel" class="scroll"></div>
+  </section>
+</main>
+<div id="tip"></div>
+<script>
+const D = /*DATA*/null;
+const $ = id => document.getElementById(id);
+const R = 34, cells = [];
+for (let y = -R; y <= R; y++) for (let x = Math.abs(y) - R; x <= R - Math.abs(y); x++) cells.push([x, y]);
+const KINDS = ["outside", "free", "obstacle", "acting entity", "ally leek", "ally summon", "enemy leek", "enemy summon"];
+let fight = 0, at = 0, tab = "Decision", timer = null, centered = false;
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const F = () => D.fights[fight], S = () => F().decisions[at];
+const act = a => ({kind: D.table[4 * a], item: D.table[4 * a + 1], dx: D.table[4 * a + 2], dy: D.table[4 * a + 3]});
+const tool = a => a.kind === 0 ? "end turn" : a.kind === 1 ? "move" : a.kind === 2 ? D.weapons[a.item] : D.chips[a.item];
+const index = (x, y) => (y <= 0 ? (y + R) ** 2 : 2381 - (R - y + 1) ** 2) + x + R - Math.abs(y);
+const kindAt = (s, x, y) => +s.map[index(x, y)];
+function describe(s, n) {
+  const a = act(n);
+  if (!a.kind) return "end turn";
+  return `${tool(a)} → (${a.dx}, ${a.dy})` + (a.kind > 1 ? `, ${KINDS[kindAt(s, a.dx, a.dy)]}` : "");
+}
+const num = v => (v > 0 ? "+" : "") + (Math.abs(v) < 0.00005 ? "0" : v.toFixed(4));
+const tone = v => Math.abs(v) < 0.00005 ? "" : v < 0 ? "bad" : "good";
+const sum = r => r ? r.reduce((a, b) => a + b, 0) : null;
+
+function center(s) { // the map's center, seen by the acting entity
+  let x = 0, y = 0, n = 0;
+  cells.forEach(([a, b], i) => { if (s.map[i] !== "0") { x += a; y += b; n++; } });
+  return [Math.round(x / n), Math.round(y / n)];
+}
+
+function board() {
+  const s = S(), chosen = act(s.chosen), c = centered ? [0, 0] : center(s);
+  const half = centered ? 35 : 18;
+  // East on screen is dx - dy, south is dx + dy, as in the game.
+  const px = (x, y) => [((x - c[0]) - (y - c[1])) * 10, ((x - c[0]) + (y - c[1])) * 10];
+  const heat = new Map(), want = $("overlay").value;
+  s.actions.forEach((n, i) => {
+    const a = act(n);
+    if (a.kind && (want === "all" || want === tool(a))) {
+      const k = a.dx + "," + a.dy; heat.set(k, (heat.get(k) || 0) + s.probs[i]);
+    }
+  });
+  const top = Math.max(1e-9, ...heat.values());
+  const who = new Map(s.seen.entities.map(e => [e.dx + "," + e.dy, e]));
+  let out = "", people = "";
+  cells.forEach(([x, y], i) => {
+    const k = +s.map[i];
+    if (k === 0) return;
+    const [u, v] = px(x, y), key = x + "," + y, p = heat.get(key) || 0;
+    const fill = k === 2 ? "var(--wall)" : "var(--free)";
+    out += `<g data-k="${key}"><path d="M${u} ${v - 9.4}L${u + 9.4} ${v}L${u} ${v + 9.4}L${u - 9.4} ${v}Z" fill="${fill}"/>`;
+    if (p) out += `<path d="M${u} ${v - 9.4}L${u + 9.4} ${v}L${u} ${v + 9.4}L${u - 9.4} ${v}Z" fill="var(--heat)" fill-opacity="${(0.12 + 0.68 * p / top).toFixed(3)}"/>`;
+    out += "</g>";
+    if (k >= 3) { // over every cell
+      people += `<g data-k="${key}">`;
+      const e = who.get(key), color = k >= 6 ? "var(--enemy)" : "var(--ally)";
+      const letter = !e ? "?" : e.summon ? e.type[0].toUpperCase() : "L";
+      people += e && e.summon ? `<rect x="${u - 6}" y="${v - 6}" width="12" height="12" rx="2" fill="${color}" stroke="var(--surface)" stroke-width="2"/>`
+                           : `<circle cx="${u}" cy="${v}" r="7.5" fill="${color}" stroke="var(--surface)" stroke-width="2"/>`;
+      if (k === 3) people += `<circle cx="${u}" cy="${v}" r="9.5" fill="none" stroke="var(--ink)" stroke-width="1.5"/>`;
+      people += `<text x="${u}" y="${v + 3.2}" text-anchor="middle" font-size="9" font-weight="700" fill="#fff">${esc(letter)}</text>`;
+      if (e) people += `<rect x="${u - 8}" y="${v + 9}" width="16" height="2.6" fill="var(--line)"/><rect x="${u - 8}" y="${v + 9}" width="${16 * Math.max(0, Math.min(1, e.life / e.total_life))}" height="2.6" fill="var(--ink)"/>`;
+      people += "</g>";
+    }
+  });
+  out += people;
+  if (chosen.kind) {
+    const [u, v] = px(chosen.dx, chosen.dy), [a, b] = px(0, 0);
+    out += `<line x1="${a}" y1="${b}" x2="${u}" y2="${v}" stroke="var(--ink)" stroke-width="1.2" stroke-dasharray="4 3"/>`;
+    out += `<path d="M${u} ${v - 10}L${u + 10} ${v}L${u} ${v + 10}L${u - 10} ${v}Z" fill="none" stroke="var(--ink)" stroke-width="2.5"/>`;
+  }
+  const w = half * 10 + 4;
+  $("board").setAttribute("viewBox", centered ? `${-w} ${-w} ${2 * w} ${2 * w}` : `${-w} ${-w} ${2 * w} ${2 * w}`);
+  $("board").innerHTML = out;
+}
+
+function tooltip(key, event) {
+  const s = S(), [x, y] = key.split(",").map(Number), tip = $("tip");
+  const e = s.seen.entities.find(e => e.dx === x && e.dy === y);
+  const here = s.actions.map((n, i) => [n, s.probs[i]]).filter(([n]) => { const a = act(n); return a.kind && a.dx === x && a.dy === y; })
+    .sort((a, b) => b[1] - a[1]);
+  tip.innerHTML = `<b>(${x}, ${y}) ${esc(KINDS[kindAt(s, x, y)])}</b>` + (e ? `<br>${esc(e.type)}: ${e.life} / ${e.total_life} life` : "") +
+    here.slice(0, 8).map(([n, p]) => `<br>${esc(tool(act(n)))}: ${(100 * p).toFixed(2)}%`).join("") +
+    (here.length > 8 ? `<br>and ${here.length - 8} more` : here.length ? "" : "<br>no legal action here");
+  tip.style.display = "block";
+  tip.style.left = Math.min(innerWidth - 270, event.clientX + 12) + "px";
+  tip.style.top = Math.min(innerHeight - tip.offsetHeight - 8, event.clientY + 12) + "px";
+}
+
+const PANELS = {
+  Decision(s) {
+    const order = s.actions.map((n, i) => [n, s.probs[i]]).sort((a, b) => b[1] - a[1]);
+    const shown = order.slice(0, 25), best = order[0][1];
+    if (!shown.some(([n]) => n === s.chosen)) shown.push(order.find(([n]) => n === s.chosen));
+    const r = s.reward, me = s.seen.entities[0];
+    return `<div class="facts"><div><span>acting</span> <b>${esc(me.type)}, team ${s.team}${s.scripted ? " (scripted)" : ""}</b></div>
+      <div><span>TP</span> <b>${me.tp} / ${me.total_tp}</b></div><div><span>MP</span> <b>${me.mp} / ${me.total_mp}</b></div>
+      <div><span>expected return</span> <b>${s.value.toFixed(3)}</b></div>
+      <div><span>legal actions</span> <b>${s.actions.length}</b></div>
+      <div><span>hesitation (entropy)</span> <b>${s.entropy}</b> <span>of ${Math.log(s.actions.length).toFixed(2)}</span></div></div>
+      <p><b>Chose: ${esc(describe(s, s.chosen))}</b></p>
+      <p>Reward up to this team's next decision: ${r ? `<b class="${tone(sum(r))}">${num(sum(r))}</b> <span class="small">${D.parts.map((p, i) => r[i] ? `${esc(p)} ${num(r[i])}` : "").filter(Boolean).join(", ")}</span>` : "unknown"}</p>
+      ${shown.map(([n, p]) => `<div class="act ${n === s.chosen ? "chosen" : ""}"><span class="p">${(100 * p).toFixed(2)}%</span><span>${esc(describe(s, n))}</span><span><div class="bar" style="width:${100 * p / best}%"></div></span></div>`).join("")}
+      <p class="small">${order.length > 25 ? `${order.length - 25} less likely actions not listed.` : ""}</p>`;
+  },
+  Entities(s) {
+    return `<p class="small">In the order of the observation: acting entity first, then by turn order.</p>` + s.seen.entities.map((e, i) => `
+      <div class="entity ${e.ally ? "" : "enemy"}"><h3>${i}. ${esc(e.type)} ${i ? (e.ally ? "(ally)" : "(enemy)") : "(acting)"}</h3>
+      <div>${e.life} / ${e.total_life} life · TP ${e.tp} / ${e.total_tp} · MP ${e.mp} / ${e.total_mp} · at (${e.dx}, ${e.dy})</div>
+      <div class="small">${Object.entries(e.stats).map(([k, v]) => `${esc(k)} ${v}`).join(" · ")}</div>
+      ${e.states.length ? `<div>states: ${e.states.map(([n, d]) => `${esc(n)} (${d})`).join(", ")}</div>` : ""}
+      ${e.effects.length ? `<div>effects: ${e.effects.map(([n, v, d]) => `${esc(n)} ${v} (${d})`).join(", ")}</div>` : ""}
+      ${e.zone ? `<div>awakening zone ${e.zone}${e.awakened ? ", already awakened by the acting entity" : ""}</div>` : ""}
+      ${e.cooldowns.length ? `<div class="small">cooldowns: ${e.cooldowns.map(([n, d]) => `${esc(n)} ${d}`).join(", ")}</div>` : ""}</div>`).join("");
+  },
+  Items(s) {
+    const leek = (l, title) => `<h3>${title}</h3><p>Weapons: ${l.weapons.map(w => w === l.holds ? `<b>${esc(w)} (in hand)</b>` : esc(w)).join(", ") || "none"}</p>
+      <p>Chips: ${l.chips.map(([n, c]) => c ? `<span class="small">${esc(n)} (${c >= 10 ? "10+" : c} turns)</span>` : esc(n)).join(", ") || "none"}</p>`;
+    return leek(s.seen.leeks[0], "Our leek") + leek(s.seen.leeks[1], "Enemy leek") +
+      `<h3>Uses left this turn (acting entity)</h3><p>${s.seen.uses.map(([n, v]) => `${esc(n)} ${v}`).join(", ") || "nothing limited"}</p>`;
+  },
+  "Raw inputs"(s) {
+    return `<p class="small">Non-zero floats among ${D.floats.length}. The network also receives the map, and the legal actions as ${s.actions.length} ones among ${D.table.length / 4}.</p>
+      <input type="search" id="search" placeholder="Filter" aria-label="Filter"><table><tbody id="raw"></tbody></table>`;
+  },
+  Fight() {
+    const f = F(), e = f.end, turn = d => d.seen.turn;
+    const rows = []; let last = null;
+    f.decisions.forEach((d, i) => {
+      const key = turn(d) + "/" + d.team;
+      if (key !== last) { rows.push({i, d, acts: [], r: 0}); last = key; }
+      const row = rows[rows.length - 1]; row.acts.push(describe(d, d.chosen)); row.r += sum(d.reward) || 0;
+    });
+    return `<p>${e ? `Ended on turn ${e.turns}: <b>${e.winner < 0 ? "draw" : "team " + e.winner + " wins"}</b>. Final life ${(100 * e.life_0).toFixed(0)}% / ${(100 * e.life_1).toFixed(0)}%, decisions ${e.decisions_0} / ${e.decisions_1}, known builds ${e.known_0 ? "yes" : "no"} / ${e.known_1 ? "yes" : "no"}.` : "Not finished: stopped by the limit of decisions."}</p>
+      <table><thead><tr><th>Turn</th><th>Team</th><th>What it did</th><th>Reward</th></tr></thead><tbody>
+      ${rows.map(r => `<tr data-go="${r.i}" style="cursor:pointer"><td>${turn(r.d)}</td><td>${r.d.team}</td><td>${r.acts.map(esc).join("<br>")}</td><td class="n ${tone(r.r)}">${num(r.r)}</td></tr>`).join("")}</tbody></table>`;
+  }
+};
+
+function raw() {
+  const body = $("raw"), q = $("search").value.toLowerCase();
+  body.innerHTML = S().raw.filter(([k]) => D.floats[k].toLowerCase().includes(q))
+    .map(([k, v]) => `<tr><td class="n">${k}</td><td>${esc(D.floats[k])}</td><td class="n">${v}</td></tr>`).join("");
+}
+
+function panel() {
+  $("tabs").innerHTML = Object.keys(PANELS).map(n => `<button role="tab" aria-selected="${n === tab}">${n}</button>`).join("");
+  $("panel").innerHTML = PANELS[tab](S());
+  if (tab === "Raw inputs") { $("search").oninput = raw; raw(); }
+}
+
+function overlay() {
+  const s = S(), keep = $("overlay").value || "all";
+  const tools = [...new Set(s.actions.map(n => tool(act(n))))].filter(t => t !== "end turn");
+  $("overlay").innerHTML = `<option value="all">Probability per cell, all actions</option>` + tools.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+  $("overlay").value = tools.includes(keep) ? keep : "all";
+}
+
+function show() {
+  const f = F();
+  at = Math.max(0, Math.min(at, f.decisions.length - 1));
+  $("scrub").max = f.decisions.length - 1; $("scrub").value = at;
+  $("where").textContent = `turn ${S().seen.turn}, decision ${at + 1} / ${f.decisions.length}, team ${S().team}`;
+  overlay(); board(); panel();
+}
+function jump(direction) { // to the next or previous turn of any entity's team
+  const f = F().decisions, key = d => d.seen.turn + "/" + d.team, here = key(f[at]);
+  let i = at;
+  while (i + direction >= 0 && i + direction < f.length && key(f[i]) === here) i += direction;
+  at = i; show();
+}
+
+$("title").textContent = D.title; document.title = D.title;
+$("fight").innerHTML = D.fights.map((f, i) => `<option value="${i}">Fight ${i + 1}: ${f.end ? (f.end.winner < 0 ? "draw" : "team " + f.end.winner + " wins") + ", turn " + f.end.turns : "unfinished"}</option>`).join("");
+$("legend").innerHTML = [["--free", "free"], ["--wall", "obstacle"], ["--ally", "ally"], ["--enemy", "enemy"], ["--heat", "more likely to be chosen"]]
+  .map(([v, t]) => `<i style="background:var(${v})"></i>${t}`).join("");
+$("fight").onchange = e => { fight = +e.target.value; at = 0; show(); };
+$("prev").onclick = () => { at--; show(); };
+$("next").onclick = () => { at++; show(); };
+$("scrub").oninput = e => { at = +e.target.value; show(); };
+$("overlay").onchange = board;
+$("play").onclick = () => {
+  if (timer) { clearInterval(timer); timer = null; }
+  else timer = setInterval(() => { if (at >= F().decisions.length - 1) $("play").click(); else { at++; show(); } }, 500);
+  $("play").setAttribute("aria-pressed", !!timer); $("play").textContent = timer ? "Pause" : "Play";
+};
+const view = c => { centered = c; $("fixed").setAttribute("aria-pressed", !c); $("centered").setAttribute("aria-pressed", c); board(); };
+$("fixed").onclick = () => view(false);
+$("centered").onclick = () => view(true);
+$("tabs").onclick = e => { if (e.target.tagName === "BUTTON") { tab = e.target.textContent; panel(); } };
+$("panel").onclick = e => { const row = e.target.closest("[data-go]"); if (row) { at = +row.dataset.go; tab = "Decision"; show(); } };
+$("board").onmousemove = e => { const g = e.target.closest("[data-k]"); if (g) tooltip(g.dataset.k, e); else $("tip").style.display = "none"; };
+$("board").onmouseleave = () => { $("tip").style.display = "none"; };
+addEventListener("keydown", e => {
+  if (/INPUT|SELECT/.test(e.target.tagName) && e.target.id !== "scrub") return;
+  if (e.key === "ArrowRight") at++; else if (e.key === "ArrowLeft") at--;
+  else if (e.key === "ArrowDown") { e.preventDefault(); return jump(1); } else if (e.key === "ArrowUp") { e.preventDefault(); return jump(-1); } else return;
+  e.preventDefault(); show();
+});
+const hash = new URLSearchParams(location.hash.slice(1));
+if (hash.has("at")) at = +hash.get("at");
+if (hash.has("tab")) tab = hash.get("tab");
+show();
+</script>
+</body>
+</html>

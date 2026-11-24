@@ -169,6 +169,26 @@ The package looks for the C library under `build*/`, or at `LEEKRL_LIBRARY`. Kno
 builds are read from `builds/known_builds.json`; `known_builds.example.json` shows the
 format, where characteristics include components.
 
+### Training
+
+PyTorch, NumPy, and W&B if used, must be installed. From the project root, after building:
+
+```sh
+set PYTHONPATH=python
+python -m leekrl.train --name first-run --updates 1000
+```
+
+Every setting of `Config` in `python/leekrl/train.py` is an option. Runs go to
+`runs/<name>`: settings, `metrics.jsonl` and checkpoints. `--deterministic` gives identical
+results for identical settings on the same machine. `--wandb online` sends metrics and
+settings to Weights & Biases, after `wandb login`; `--wandb offline` keeps them in the run
+folder. To stop early, press Ctrl+C or create a file named `stop` in the run's folder: the
+current update is finished and a checkpoint saved, to continue with `--resume`.
+
+`python -m leekrl.peek --checkpoint runs/first-run/checkpoint_000050.pt` writes a local
+HTML page to step through fights: what the network receives, decoded, and what it makes of
+it. `--peek-every 50` writes one regularly during training.
+
 ### Builds
 
 `leekrl/build.h` draws random legal level 301 builds, reproducible from a 64-bit

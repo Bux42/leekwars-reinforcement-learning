@@ -91,7 +91,14 @@ flat 1D observation and no convolution, to keep the network small and fast.
 - 2,381 relative cells (a diamond of radius 34). The 69x69 square holds the same
   information; its other half is always outside the map.
 - The environment writes one category per cell, as a byte.
-- The network turns each category into 4 learned numbers, then uses dense layers.
+- The network sums one learned vector per (cell, category), for obstacles and entities
+  only, plus one for the acting entity's position on the map.
+
+The map's shape is fixed, so the position says exactly which cells are outside, and free
+cells need nothing. Nothing is lost, which a test checks.
+
+The first choice was 4 learned numbers per category followed by dense layers. The new one
+costs several times less to learn from on CPU, and can represent more.
 
 A single float per cell would place unrelated categories on one scale. Bytes keep the
 memory small: 2.4 KB per observation instead of 76 KB for one-hot floats.
@@ -172,3 +179,38 @@ Date: 2026-11-24. Status: accepted.
 46 items can be used a limited number of times per turn. The mask only says whether one
 more use is possible, so 1 and 4 shots left look the same. The observation gives the
 uses left, for the acting entity only: those of others reset before they play again.
+
+## Useless casts are masked
+
+Date: 2026-11-24. Status: accepted.
+
+A cast whose area holds no entity any of its effects accepts cannot change anything. It is
+masked, except when it affects its caster anyway (a sword's shield), summons or teleports,
+or when the caster holds a weapon that reacts to its critical hits. 518,000 masked casts
+were executed on cloned fights, none had an effect. 84% of legal casts are masked.
+
+Casts that reach someone but achieve nothing (healing a leek at full life) are kept.
+
+## One independent output per action
+
+Date: 2026-11-24. Status: accepted as the baseline.
+
+Each of the 10,566 actions has its own output, as planned from the start: every castable on
+every cell can have its own consequences. Other forms will be compared to it later.
+
+The alternative, kept as `--head pair`, scores an action from what is known about its item
+and about its target cell (category, place, entity standing there). What is learned about a
+cell then serves every item. One run each, with one known build on both sides, against an
+enemy that only ends its turns, 60 updates: 100% of wins in 5.8 turns for pairs, 87% in
+23.7 turns for independent outputs. In its present form it can hardly choose among several
+targets from a combination of circumstances, which placement items (inversion) need. A
+small network looking at item, target and situation together would allow it.
+
+## Both sides of the map must be seen in training
+
+Date: 2026-11-24. Status: accepted.
+
+A network trained only as team 0 won 256 fights out of 256 as team 0, and drew 97% as team
+1. The likely reason, not tested on its own, is that the same situation facing the other
+way looks different. Self-play shows both sides; opponents that do not learn alternate.
+Mirroring the observation is an idea for later.

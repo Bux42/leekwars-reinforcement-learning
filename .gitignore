@@ -31,3 +31,4 @@ __pycache__/
 # Training
 runs/
 wandb/
+build-*/

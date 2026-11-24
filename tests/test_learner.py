@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -166,12 +167,32 @@ class LearnerTests(unittest.TestCase):
                 rows = distribution.legal.rows == i
                 torch.testing.assert_close(alone.log_probs, distribution.log_probs[rows])
 
+    def test_position_stands_for_the_outside(self):
+        """The position gives back exactly which cells are outside the map."""
+        outside, found = {}, set()
+        random = np.random.default_rng(5)
+        with VecEnv(64, threads=4, seed=9) as env:
+            model = Policy(env.actions, env.float_count, 16, 16)
+            env.reset()
+            for _ in range(60):
+                cells = torch.from_numpy(env.map.copy())
+                places = model.place(cells)
+                self.assertTrue(((places >= 0) & (places < 35 * 35)).all())
+                for place, row in zip(places.tolist(), (env.map == 0)):
+                    shape = row.tobytes()
+                    self.assertEqual(outside.setdefault(place, shape), shape)
+                    found.add(place)
+                legal = env.legal()
+                env.step((legal * random.random(legal.shape, np.float32)).argmax(1))
+        self.assertGreater(len(found), 300)
+        self.assertEqual(len(set(outside.values())), len(outside))
+
     def test_pair_head(self):
         """Scores agree with the formula, written action by action."""
         with VecEnv(4, threads=2, seed=3) as env:
             env.reset()
             cells, floats, mask = inputs(env, "cpu")
-            model = Policy(env.actions, env.float_count, 16, 16)
+            model = Policy(env.actions, env.float_count, 16, 16, head="pair")
             head = model.policy
             distribution, _ = model(cells, floats, mask)
             legal = distribution.legal
@@ -288,6 +309,40 @@ class LearnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "another network"):
                 train(config, folder)
 
+    def test_stopping(self):
+        import signal
+        from leekrl import train as module
+        original = module.update
+
+        def check(ask):
+            calls = []
+
+            def update(*arguments):
+                calls.append(1)
+                if len(calls) == 3:
+                    ask(folder)
+                return original(*arguments)
+
+            module.update = update
+            try:
+                _, history = train(small(updates=50, save_every=40), folder)
+            finally:
+                module.update = original
+            self.assertEqual(len(history), 3)       # that update is finished
+            self.assertTrue((Path(folder) / "checkpoint_000003.pt").exists())
+            self.assertFalse((Path(folder) / "stop").exists())
+
+        before = signal.getsignal(signal.SIGINT)
+        with tempfile.TemporaryDirectory() as folder:
+            check(lambda f: (Path(f) / "stop").write_text(""))
+        with tempfile.TemporaryDirectory() as folder:
+            check(lambda f: signal.raise_signal(signal.SIGINT))
+        self.assertEqual(signal.getsignal(signal.SIGINT), before)
+        # A file left by a previous run does not stop the next one.
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "stop").write_text("")
+            self.assertEqual(len(train(small(updates=2), folder)[1]), 2)
+
     def test_evaluation(self):
         with VecEnv(1) as env:
             model = Policy(env.actions, env.float_count, 16, 16)
@@ -296,6 +351,47 @@ class LearnerTests(unittest.TestCase):
         self.assertEqual(result, evaluate(model, small(), (), 16, seed=1))
         against_itself = evaluate(model, small(), (), 16, seed=1, opponent=model, greedy=True)
         self.assertAlmostEqual(sum(against_itself[k] for k in ("wins", "losses", "draws")), 1)
+
+    def test_peek(self):
+        from leekrl import peek
+        names = peek.item_names()
+        self.assertEqual((len(names["weapons"]), len(names["chips"]), len(names["limited"])),
+                         (37, 105, 46))
+        self.assertEqual(names["weapons"][0], "pistol")
+        self.assertNotIn("resurrection", names["chips"])
+        floats = peek.float_names(names)
+        self.assertEqual(len(floats), 2705)
+        self.assertEqual(floats[3 + 116 + 18], "entity 1: dx")
+        self.assertEqual(floats[3 + 18 * 116], "our leek: has pistol")
+        with VecEnv(1) as env:
+            model = Policy(env.actions, env.float_count, 16, 16)
+        fights = peek.record(model, 2, seed=4)
+        self.assertEqual(json.dumps(fights), json.dumps(peek.record(model, 2, seed=4)))
+        for fight in fights:
+            self.assertIsNotNone(fight["end"])
+            for d in fight["decisions"]:
+                self.assertIn(d["chosen"], d["actions"])
+                self.assertAlmostEqual(sum(d["probs"]), 1, places=2)
+                self.assertEqual(len(d["map"]), 2381)
+                first, others = d["seen"]["entities"][0], d["seen"]["entities"][1:]
+                self.assertEqual((first["dx"], first["dy"], first["ally"]), (0, 0, True))
+                self.assertGreater(first["life"], 0)
+                for e in others:    # the map agrees with the entities
+                    cell = d["map"][int(map_index(torch.tensor(e["dx"]),
+                                                  torch.tensor(e["dy"])))]
+                    self.assertEqual(int(cell), (4 if e["ally"] else 6) + e["summon"])
+            ends = {d["team"]: d["reward"] for d in fight["decisions"]}
+            winner = int(fight["end"]["winner"])
+            for team, reward in ends.items():
+                self.assertAlmostEqual(
+                    reward[3], -0.2 if winner < 0 else 1 if winner == team else -1, places=4)
+        with tempfile.TemporaryDirectory() as folder:
+            path = peek.write(Path(folder) / "page.html", fights, "a </script> title")
+            page = path.read_text("utf8")
+            self.assertNotIn("/*DATA*/null", page)
+            self.assertEqual(page.count("</script>"), 1)
+            train(small(updates=2, peek_every=1, peek_fights=1), folder)
+            self.assertTrue((Path(folder) / "peek_000002.html").exists())
 
     def test_options(self):
         config = parse(["--envs", "4", "--no-mask-input", "--gamma", "0.5", "--deterministic"])

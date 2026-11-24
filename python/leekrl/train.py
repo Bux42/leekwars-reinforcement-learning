@@ -4,13 +4,19 @@
 
 Every setting of Config is an option. Metrics go to runs/<name>/metrics.jsonl, and to
 Weights & Biases with --wandb online (or offline).
+
+To stop early, press Ctrl+C, or create a file named "stop" in runs/<name>: the current
+update is finished, and a checkpoint is saved.
 """
 
 import argparse
+import copy
 import json
 import os
 import random
+import signal
 import subprocess
+import threading
 import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -43,7 +49,7 @@ class Config:
     branch: int = 128
     hidden: int = 256
     mask_input: bool = True
-    head: str = "pair"             # pair (item x cell scores) or flat
+    head: str = "flat"             # flat (one output per action) or pair (item x cell)
     # PPO
     gamma: float = 0.999
     lam: float = 0.95
@@ -63,6 +69,8 @@ class Config:
     eval_every: int = 20           # updates between evaluations, 0 to disable
     eval_fights: int = 200
     save_every: int = 50
+    peek_every: int = 0            # updates between pages showing fights, 0 to disable
+    peek_fights: int = 2
     resume: str = ""               # checkpoint to continue from
     wandb: str = "disabled"        # disabled, offline or online
     wandb_project: str = "leekwars-rl"
@@ -249,6 +257,8 @@ class Log:
                          encoding="utf8")
         self.run = None
         if config.wandb != "disabled":
+            # No crash report to W&B's own servers, above all when offline.
+            os.environ.setdefault("WANDB_ERROR_REPORTING", "false")
             import wandb
             self.run = wandb.init(project=config.wandb_project, name=config.name,
                                   mode=config.wandb, dir=str(folder),
@@ -270,6 +280,36 @@ class Log:
         self.file.close()
         if self.run:
             self.run.finish()
+
+
+class Stopper:
+    """Says when to stop: Ctrl+C, or a file named "stop" in the run's folder."""
+
+    def __init__(self, folder):
+        self.file = folder / "stop"
+        self.asked = False
+        self.file.unlink(missing_ok=True)
+
+    def __enter__(self):
+        # Signals can only be handled by the main thread.
+        self.main = threading.current_thread() is threading.main_thread()
+        if self.main:
+            self.previous = signal.signal(signal.SIGINT, self._interrupt)
+        return self
+
+    def _interrupt(self, *_):
+        if self.asked:
+            raise KeyboardInterrupt     # the second time, at once
+        self.asked = True
+        print("stopping after this update (Ctrl+C again to abort)", flush=True)
+
+    def __bool__(self):
+        return self.asked or self.file.exists()
+
+    def __exit__(self, *_):
+        if self.main:
+            signal.signal(signal.SIGINT, self.previous)
+        self.file.unlink(missing_ok=True)
 
 
 def save(path, model, optimizer, config, step, details, decisions, fights):
@@ -304,7 +344,8 @@ def train(config, folder=None):
                "known_names": env.known_names}
     model = Policy(env.actions, env.float_count, config.branch, config.hidden,
                    config.mask_input, config.head).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, eps=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, eps=1e-5,
+                                 fused=True)
     start = decisions = 0
     fights = Fights()
     if config.resume:
@@ -319,41 +360,54 @@ def train(config, folder=None):
     history = []
     env.reset()
     try:
-        for step in range(start + 1, config.updates + 1):
-            if config.anneal:
-                for group in optimizer.param_groups:
-                    group["lr"] = config.learning_rate * (1 - (step - 1) / config.updates)
-            began = time.perf_counter()
-            before = fights.total
-            rollout.trained[:] = True
-            rewards = collect(env, model, rollout, config, generator, fights)
-            collected = time.perf_counter()
-            result = update(model, optimizer, rollout, config, generator)
-            ended = time.perf_counter()
-            decisions += config.steps * config.envs
-            metrics = {f"ppo/{name}": value for name, value in asdict(result).items()}
-            metrics["ppo/learning_rate"] = optimizer.param_groups[0]["lr"]
-            metrics.update(rewards)
-            finished = fights.total - before
-            metrics.update(fights.report())
-            metrics.update({
-                "time/decisions": decisions,
-                "time/decisions_per_second": config.steps * config.envs / (ended - began),
-                "time/fights_per_second": finished / (ended - began),
-                "time/collect_seconds": collected - began,
-                "time/update_seconds": ended - collected})
-            if config.eval_every and (step % config.eval_every == 0 or
-                                      step == config.updates):
-                for opponent in ("idle", "random"):
-                    for name, value in evaluate(model, config, known, config.eval_fights,
-                                                1_000_003, opponent).items():
-                        metrics[f"eval/{opponent}_{name}"] = value
-            log.write(step, metrics)
-            history.append(metrics)
-            if config.save_every and (step % config.save_every == 0 or
-                                      step == config.updates):
-                save(folder / f"checkpoint_{step:06d}.pt", model, optimizer, config, step,
-                     details, decisions, fights.total)
+        with Stopper(folder) as stop:
+            for step in range(start + 1, config.updates + 1):
+                if config.anneal:
+                    for group in optimizer.param_groups:
+                        group["lr"] = config.learning_rate * (1 - (step - 1) / config.updates)
+                began = time.perf_counter()
+                before = fights.total
+                rollout.trained[:] = True
+                rewards = collect(env, model, rollout, config, generator, fights)
+                collected = time.perf_counter()
+                result = update(model, optimizer, rollout, config, generator)
+                ended = time.perf_counter()
+                decisions += config.steps * config.envs
+                metrics = {f"ppo/{name}": value for name, value in asdict(result).items()}
+                metrics["ppo/learning_rate"] = optimizer.param_groups[0]["lr"]
+                metrics.update(rewards)
+                finished = fights.total - before
+                metrics.update(fights.report())
+                metrics.update({
+                    "time/decisions": decisions,
+                    "time/decisions_per_second": config.steps * config.envs / (ended - began),
+                    "time/fights_per_second": finished / (ended - began),
+                    "time/collect_seconds": collected - began,
+                    "time/update_seconds": ended - collected})
+                last = step == config.updates or bool(stop)
+                if config.eval_every and (step % config.eval_every == 0 or last):
+                    for opponent in ("idle", "random"):
+                        for name, value in evaluate(model, config, known, config.eval_fights,
+                                                    1_000_003, opponent).items():
+                            metrics[f"eval/{opponent}_{name}"] = value
+                log.write(step, metrics)
+                history.append(metrics)
+                if config.save_every and (step % config.save_every == 0 or last):
+                    save(folder / f"checkpoint_{step:06d}.pt", model, optimizer, config, step,
+                         details, decisions, fights.total)
+                if config.peek_every and (step % config.peek_every == 0 or last):
+                    # The same maps and builds each time, to compare.
+                    from . import peek
+                    model_cpu = model if config.device == "cpu" else copy.deepcopy(model).cpu()
+                    peek.write(folder / f"peek_{step:06d}.html",
+                               peek.record(model_cpu, config.peek_fights, 1_000_033, known,
+                                           known_probability=config.known_probability,
+                                           skew=config.skew, trim_useless=config.trim_useless),
+                               f"{config.name}, update {step}, against itself")
+                if last:
+                    if step < config.updates:
+                        print(f"stopped after update {step}", flush=True)
+                    break
     finally:
         log.close()
         env.close()
@@ -373,8 +427,8 @@ def parse(arguments=None):
     config = Config(**vars(parser.parse_args(arguments)))
     if config.opponent not in ("self", "random", "idle"):
         parser.error("--opponent must be self, random or idle")
-    if config.head not in ("pair", "flat"):
-        parser.error("--head must be pair or flat")
+    if config.head not in ("flat", "pair"):
+        parser.error("--head must be flat or pair")
     if config.wandb not in ("disabled", "offline", "online"):
         parser.error("--wandb must be disabled, offline or online")
     return config

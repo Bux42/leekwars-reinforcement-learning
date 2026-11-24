@@ -142,7 +142,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/weapons.json" AND
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME leekwars_python
             COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_python.py")
-        set_tests_properties(leekwars_python PROPERTIES
+        # Skips itself if PyTorch is not installed.
+        add_test(NAME leekwars_learner
+            COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_learner.py")
+        set_tests_properties(leekwars_python leekwars_learner PROPERTIES
             ENVIRONMENT "LEEKRL_LIBRARY=$<TARGET_FILE:leekrl_shared>")
     endif()
 endif()

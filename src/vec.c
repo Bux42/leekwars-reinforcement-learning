@@ -407,6 +407,31 @@ int leekrl_vec_action_table(int32_t *table)
     return n != 0;
 }
 
+int leekrl_vec_items(int32_t *weapons, int32_t *chips)
+{
+    leekrl_action_catalog *catalog = NULL;
+    leekrl_observer *observer;
+    const leekrl_action *actions;
+    size_t i, n;
+    if (!weapons || !chips ||
+        leekrl_action_catalog_create_without(leekrl_solo_excluded_items,
+                                             leekrl_solo_excluded_count, &catalog) !=
+            LEEKRL_ACTION_OK) return 0;
+    observer = leekrl_observer_create(catalog);
+    actions = leekrl_action_catalog_actions(catalog);
+    n = observer ? leekrl_action_catalog_count(catalog) : 0;
+    for (i = 0; i < n; ++i) {
+        int id = actions[i].item_id;
+        if (actions[i].kind == LEEKRL_ACTION_WEAPON)
+            weapons[leekrl_observer_weapon_index(observer, id)] = id;
+        else if (actions[i].kind == LEEKRL_ACTION_CHIP)
+            chips[leekrl_observer_chip_index(observer, id)] = id;
+    }
+    leekrl_observer_destroy(observer);
+    leekrl_action_catalog_destroy(catalog);
+    return n != 0;
+}
+
 void leekrl_vec_layout(leekrl_vec_layout_info *layout)
 {
     if (!layout) return;

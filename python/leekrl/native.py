@@ -82,6 +82,7 @@ def _declare(library):
         "leekrl_vec_error": (c_char_p, [c_void_p]),
         "leekrl_build_base": (c_int, [c_int]),
         "leekrl_vec_action_table": (c_int, [POINTER(c_int32)]),
+        "leekrl_vec_items": (c_int, [POINTER(c_int32), POINTER(c_int32)]),
     }
     for name, (result, arguments) in declarations.items():
         function = getattr(library, name)

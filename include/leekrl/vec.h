@@ -92,6 +92,10 @@ int leekrl_vec_sizes(size_t *actions, size_t *floats, size_t *mask_bytes);
  * the observation (-1 for none), dx, dy. Holds 4 x actions values. Returns 1 or 0. */
 int leekrl_vec_action_table(int32_t *table);
 
+/* Item ids of the weapons and chips of the observation, in their order. The arrays
+ * hold as many values as leekrl_vec_action_table has items. Returns 1 or 0. */
+int leekrl_vec_items(int32_t *weapons, int32_t *chips);
+
 /* Sizes a binding can compare with its own. */
 typedef struct {
     int map_cells;

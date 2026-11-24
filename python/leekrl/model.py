@@ -1,8 +1,10 @@
 """Policy and value network.
 
-Most inputs and nearly all actions are zeros: about 613 of the 2,381 cells are on the
-map, and a few hundred of the 10,566 actions are legal. Maps and masks are therefore
-handled as lists of indices, which is several times faster on CPU than dense arrays.
+Most inputs and nearly all actions are zeros. Maps and masks are therefore handled as
+lists of indices, which is several times faster on CPU than dense arrays.
+
+The map has a fixed shape: the cells outside it only depend on where the acting entity
+stands. The network gets that position, and only the cells that hold something.
 """
 
 import torch
@@ -12,11 +14,20 @@ from .vec import action_table
 
 MAP_CELLS = 2381
 MAP_RADIUS = 34
+REAL_CELLS = 613
 CATEGORIES = 8
+FREE = 1
 
 # Entity blocks in the floats: see specs/Observation.md.
 ENTITY_START, ENTITY_SIZE, ENTITIES = 3, 116, 18
 PRESENT, DX, DY = 0, 18, 19
+
+
+def relative_cells():
+    """dx and dy of each cell of the map observation."""
+    rows = [(x, y) for y in range(-MAP_RADIUS, MAP_RADIUS + 1)
+            for x in range(abs(y) - MAP_RADIUS, MAP_RADIUS - abs(y) + 1)]
+    return torch.tensor(rows, dtype=torch.float32).unbind(1)
 
 
 def map_index(dx, dy):
@@ -32,7 +43,8 @@ class Legal:
 
     def __init__(self, mask):
         self.rows, self.actions = mask.nonzero(as_tuple=True)
-        self.counts = mask.sum(1)
+        # Counting the pairs is much faster than summing the mask.
+        self.counts = torch.bincount(self.rows, minlength=mask.shape[0])
         self.offsets = torch.cat([self.counts.new_zeros(1), self.counts.cumsum(0)[:-1]])
         self.batch = mask.shape[0]
 
@@ -92,17 +104,19 @@ class Distribution:
 
 
 class FlatHead(nn.Module):
-    """One independent output per action."""
+    """One independent output per action, computed for the legal ones only."""
 
     def __init__(self, hidden, actions):
         super().__init__()
-        self.logits = nn.Linear(hidden, actions)
+        self.weight = nn.Embedding(actions, hidden)
+        self.bias = nn.Embedding(actions, 1)
         # Nearly uniform at first.
-        nn.init.orthogonal_(self.logits.weight, gain=0.01)
-        nn.init.zeros_(self.logits.bias)
+        nn.init.normal_(self.weight.weight, std=0.001)
+        nn.init.zeros_(self.bias.weight)
 
     def forward(self, hidden, cells, floats, legal):
-        return self.logits(hidden)[legal.rows, legal.actions]
+        return ((hidden[legal.rows] * self.weight(legal.actions)).sum(1)
+                + self.bias(legal.actions).squeeze(1))
 
 
 class PairHead(nn.Module):
@@ -122,9 +136,7 @@ class PairHead(nn.Module):
                                                             kind))
         self.register_buffer("tool", tool, persistent=False)
         self.register_buffer("cell", map_index(dx, dy), persistent=False)
-        rows = [(x, y) for y in range(-MAP_RADIUS, MAP_RADIUS + 1)
-                for x in range(abs(y) - MAP_RADIUS, MAP_RADIUS - abs(y) + 1)]
-        x, y = torch.tensor(rows, dtype=torch.float32).unbind(1)
+        x, y = relative_cells()
         x, y = x / 10, y / 10
         places = torch.stack([x, y, x * x, y * y, x * y, x.abs() + y.abs()], 1)
         self.register_buffer("places", places, persistent=False)
@@ -171,12 +183,16 @@ class PairHead(nn.Module):
 
 class Policy(nn.Module):
     def __init__(self, actions, floats, branch=128, hidden=256, mask_input=True,
-                 head="pair"):
+                 head="flat"):
         super().__init__()
         self.settings = {"actions": actions, "floats": floats, "branch": branch,
                          "hidden": hidden, "mask_input": mask_input, "head": head}
-        # A vector per (cell, category), the category "outside" being zero.
-        self.map = nn.EmbeddingBag(MAP_CELLS * (CATEGORIES - 1), branch, mode="sum")
+        # A vector per (cell, category) for obstacles and entities, and one per position
+        # on the map: together they say as much as the whole map.
+        self.map = nn.EmbeddingBag(MAP_CELLS * (CATEGORIES - FREE - 1), branch, mode="sum")
+        self.position = nn.Embedding((MAP_RADIUS + 1) ** 2, branch)
+        x, y = relative_cells()
+        self.register_buffer("offsets", torch.stack([x, y], 1), persistent=False)
         self.floats = nn.Linear(floats, branch)
         # A vector per action, summed over the legal ones.
         self.mask = nn.EmbeddingBag(actions, branch, mode="sum") if mask_input else None
@@ -184,25 +200,35 @@ class Policy(nn.Module):
         self.trunk = nn.Sequential(nn.LayerNorm(width), nn.ReLU(),
                                    nn.Linear(width, hidden), nn.ReLU(),
                                    nn.Linear(hidden, hidden), nn.ReLU())
-        if head == "pair":
-            self.policy = PairHead(hidden)
-        elif head == "flat":
+        if head == "flat":
             self.policy = FlatHead(hidden, actions)
+        elif head == "pair":
+            self.policy = PairHead(hidden)
         else:
             raise ValueError(f"unknown head {head!r}")
         self.value = nn.Linear(hidden, 1)
-        nn.init.normal_(self.map.weight, std=0.04)
+        nn.init.normal_(self.map.weight, std=0.1)
+        nn.init.normal_(self.position.weight, std=0.1)
         if mask_input:
             nn.init.normal_(self.mask.weight, std=0.06)
         nn.init.orthogonal_(self.value.weight, gain=1)
         nn.init.zeros_(self.value.bias)
 
+    def place(self, cells):
+        """Index of the acting entity's position, from the center of the map seen by it."""
+        # The map is symmetric: its center is the mean of its cells.
+        center = ((cells != 0).float() @ self.offsets / REAL_CELLS).round().long()
+        half = MAP_RADIUS // 2
+        return (center[:, 1] + half) * (MAP_RADIUS + 1) + center[:, 0] + half
+
     def _trunk(self, cells, floats, legal):
-        rows, columns = cells.nonzero(as_tuple=True)
-        indices = columns * (CATEGORIES - 1) + cells[rows, columns].long() - 1
-        counts = (cells != 0).sum(1)
+        held = cells > FREE
+        rows, columns = held.nonzero(as_tuple=True)
+        indices = columns * (CATEGORIES - FREE - 1) + cells[rows, columns].long() - FREE - 1
+        counts = torch.bincount(rows, minlength=cells.shape[0])
         offsets = torch.cat([counts.new_zeros(1), counts.cumsum(0)[:-1]])
-        parts = [self.map(indices, offsets), self.floats(floats)]
+        parts = [self.map(indices, offsets) + self.position(self.place(cells)),
+                 self.floats(floats)]
         if self.mask is not None:
             parts.append(self.mask(legal.actions, legal.offsets))
         return self.trunk(torch.cat(parts, 1))
