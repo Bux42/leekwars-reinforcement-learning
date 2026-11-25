@@ -32,7 +32,7 @@ class RewardOptions(Structure):
 class VecOptions(Structure):
     _fields_ = [("envs", c_int), ("threads", c_int), ("seed", c_uint64),
                 ("known_probability", c_double), ("skip_forced", c_int),
-                ("trim_useless", c_int),
+                ("trim", c_int),
                 ("builds", BuildOptions), ("rewards", RewardOptions)]
 
 

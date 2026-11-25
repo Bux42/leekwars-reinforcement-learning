@@ -17,7 +17,7 @@ import torch
 from .builds import load_known_builds
 from .model import Policy
 from .native import ROOT, library
-from .vec import EPISODE_FIELDS, REWARD_PARTS, VecEnv, action_table
+from .vec import EPISODE_FIELDS, REWARD_PARTS, TRIMS, VecEnv, action_table
 
 TEMPLATE = Path(__file__).with_name("peek.html")
 
@@ -210,20 +210,26 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--opponent", choices=("self", "random", "idle"), default="self")
     parser.add_argument("--known-probability", type=float, default=0.01)
+    parser.add_argument("--trim", choices=TRIMS,
+                        help="casts masked, as in training by default")
     parser.add_argument("--out", help="runs/peek.html, or next to the checkpoint")
     options = parser.parse_args()
     if options.checkpoint:
         from .train import load_policy
         model, data = load_policy(options.checkpoint)
         title = f"{data['config']['name']}, update {data['update']}"
+        # Runs that do not say only masked useless casts.
+        trim = options.trim or data["config"].get("trim", "useless")
         out = options.out or Path(options.checkpoint).with_suffix(".html")
     else:
         torch.manual_seed(options.seed)
         with VecEnv(1) as env:
             model = Policy(env.actions, env.float_count)
         title, out = "untrained network", options.out or ROOT / "runs" / "peek.html"
+        trim = options.trim
     fights = record(model, options.fights, options.seed, load_known_builds(),
-                    options.opponent, known_probability=options.known_probability)
+                    options.opponent, known_probability=options.known_probability,
+                    trim=trim)
     print(write(out, fights, f"{title}, against {options.opponent}"))
 
 

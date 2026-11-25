@@ -12,6 +12,9 @@ REWARD_PARTS = ("life", "total_life", "summons", "outcome", "duration", "actions
 EPISODE_FIELDS = ("turns", "winner", "decisions_0", "decisions_1", "actions_0", "actions_1",
                   "life_0", "life_1", "known_0", "known_1", "redrawn")
 
+# Casts left out of the masks, see actions.h. Each level also leaves out those of the
+# previous one.
+TRIMS = ("nothing", "useless", "harmful")
 # Instead of an action: the environment waits, and only its done is cleared.
 WAIT = -1
 
@@ -48,7 +51,7 @@ class VecEnv:
     """
 
     def __init__(self, envs, threads=None, seed=0, known_builds=(), known_probability=None,
-                 skip_forced=None, trim_useless=None, skew=None, stat_weights=None,
+                 skip_forced=None, trim=None, skew=None, stat_weights=None,
                  rewards=None):
         self._lib = library()
         self._vec = None
@@ -72,8 +75,10 @@ class VecEnv:
             options.known_probability = known_probability
         if skip_forced is not None:
             options.skip_forced = skip_forced
-        if trim_useless is not None:
-            options.trim_useless = trim_useless
+        if trim is not None:
+            if trim not in TRIMS:
+                raise ValueError(f"trim must be one of {', '.join(TRIMS)}, not {trim!r}")
+            options.trim = TRIMS.index(trim)
         if skew is not None:
             options.builds.skew = skew
         for stat, weight in (stat_weights or {}).items():

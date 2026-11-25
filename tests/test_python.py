@@ -14,7 +14,7 @@ except ImportError:
     np = None
 
 if np is not None:
-    from leekrl import EPISODE_FIELDS, WAIT, VecEnv, load_known_builds
+    from leekrl import EPISODE_FIELDS, TRIMS, WAIT, VecEnv, load_known_builds
 
 
 def play(steps, seed=1, **options):
@@ -87,6 +87,34 @@ class PythonTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             page = show_builds.write(Path(folder) / "page.html", show_builds.prepare(20))
             self.assertNotIn("/*DATA*/null", page.read_text("utf8"))
+
+    def test_trims(self):
+        """Each level leaves out more casts, and nothing else changes."""
+        random = np.random.default_rng(3)
+        envs = [VecEnv(16, seed=8, skip_forced=False, trim=trim) for trim in TRIMS]
+        fewer = [0, 0]
+        for env in envs:
+            env.reset()
+        for _ in range(300):
+            masks = [env.legal() for env in envs]
+            for k, (more, less) in enumerate(zip(masks, masks[1:])):
+                self.assertFalse((less & ~more).any())
+                np.testing.assert_array_equal(less[:, :841], more[:, :841])
+                fewer[k] += int((more & ~less).sum())
+            actions = [random.choice(np.flatnonzero(row)) for row in masks[-1]]
+            for env in envs:
+                env.step(actions)
+                np.testing.assert_array_equal(env.floats, envs[0].floats)
+        self.assertGreater(fewer[0], 1000)
+        self.assertGreater(fewer[1], 100)
+        with VecEnv(16, seed=8, skip_forced=False) as default:
+            default.reset()
+            envs[-1].reset()
+            np.testing.assert_array_equal(default.mask, envs[-1].mask)
+        for env in envs:
+            env.close()
+        with self.assertRaisesRegex(ValueError, "trim must be one of"):
+            VecEnv(1, trim="all")
 
     def test_waiting(self):
         """An environment that waits only clears done, and others are not affected."""

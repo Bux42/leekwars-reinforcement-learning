@@ -71,7 +71,7 @@ void leekrl_vec_options_init(leekrl_vec_options *options)
     options->threads = 1;
     options->known_probability = 0.01;
     options->skip_forced = 1;
-    options->trim_useless = 1;
+    options->trim = LEEKRL_TRIM_HARMFUL;
     leekrl_build_options_init(&options->builds);
     leekrl_reward_options_init(&options->rewards);
 }
@@ -246,10 +246,8 @@ static int advance(environment *env)
         LwEntity *actor = lw_fight_step_current(&env->fight);
         if (actor) {
             if (!lw_entity_is_dead(actor) && !lw_state_is_finished(&env->state)) {
-                leekrl_action_status status =
-                    (vec->options.trim_useless ? leekrl_action_catalog_useful_mask
-                                               : leekrl_action_catalog_mask)(
-                        vec->catalog, &env->fight, actor, env->legal);
+                leekrl_action_status status = leekrl_action_catalog_trimmed_mask(
+                    vec->catalog, &env->fight, actor, vec->options.trim, env->legal);
                 if (status != LEEKRL_ACTION_OK)
                     return fail(env, "cannot compute the mask",
                                 leekrl_action_status_string(status));
@@ -486,7 +484,8 @@ leekrl_vec *leekrl_vec_create(const leekrl_vec_options *options,
     if (error && error_size) error[0] = 0;
     if (!options || !buffers || options->envs < 1 || options->envs > 1 << 20 ||
         options->threads < 1 || !(options->known_probability >= 0) ||
-        options->known_probability > 1 || !leekrl_reward_options_valid(&options->rewards) ||
+        options->known_probability > 1 || (unsigned)options->trim > LEEKRL_TRIM_HARMFUL ||
+        !leekrl_reward_options_valid(&options->rewards) ||
         !buffers->floats || !buffers->map || !buffers->mask || !buffers->rewards ||
         !buffers->team || !buffers->first || !buffers->done || !buffers->end_rewards ||
         !buffers->episode) {

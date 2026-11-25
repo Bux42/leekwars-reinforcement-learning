@@ -1,6 +1,7 @@
 #ifndef LEEKRL_VEC_H
 #define LEEKRL_VEC_H
 
+#include "leekrl/actions.h"
 #include "leekrl/build.h"
 #include "leekrl/observation.h"
 #include "leekrl/reward.h"
@@ -31,13 +32,13 @@ typedef struct {
     uint64_t seed;
     double known_probability; /* chance of a known build, for each side alone */
     int skip_forced;          /* end turns that have no other legal action */
-    int trim_useless;         /* mask casts that cannot affect anything */
+    leekrl_trim trim;         /* casts left out of the mask */
     leekrl_build_options builds;
     leekrl_reward_options rewards;
 } leekrl_vec_options;
 
-/* 1 env, 1 thread, seed 0, 1% of known builds, forced turns skipped, useless casts
- * masked. */
+/* 1 env, 1 thread, seed 0, 1% of known builds, forced turns skipped, useless and
+ * harmful casts masked. */
 void leekrl_vec_options_init(leekrl_vec_options *options);
 
 /* Figures of a finished fight. */

@@ -10,6 +10,7 @@
 #include "lw_attack.h"
 #include "lw_bulb_template.h"
 #include "lw_chip.h"
+#include "lw_effect.h"
 #include "lw_entity.h"
 #include "lw_fight.h"
 #include "lw_map.h"
@@ -497,37 +498,128 @@ static const catalog_item *find_item(const leekrl_action_catalog *catalog,
                                          sizeof(key), compare_items) : NULL;
 }
 
-/* What a cast needs to change anything. */
-typedef struct {
-    int always;                  /* whatever is reached */
-    int any_entity;              /* an entity of any kind is enough */
-    int n_targets;
-    int targets[LW_ATTACK_MAX_EFFECTS]; /* target filters of the other effects */
-} usefulness;
+/* Passive effects of weapons, without a name in the generator. They act whichever
+ * weapon is in hand. */
+enum {
+    POISON_TO_SCIENCE = 33,
+    DAMAGE_TO_ABSOLUTE_SHIELD = 34,
+    DAMAGE_TO_STRENGTH = 35,
+    NOVA_DAMAGE_TO_MAGIC = 36, /* and the maximum life lost with any damage */
+    KILL_TO_TP = 56,
+    CRITICAL_TO_HEAL = 58
+};
+#define PASSIVE(id) (UINT64_C(1) << (id))
 
-#define CRITICAL_TO_HEAL 58 /* passive weapon effect */
-
-/* Casts of this entity can matter by themselves, through critical hits. */
-static int reacts_to_critical(const LwEntity *actor)
+static uint64_t passive_effects(const LwEntity *actor)
 {
+    uint64_t found = 0;
     int i, k;
     for (i = 0; i < lw_entity_get_weapons_count(actor); ++i) {
         const LwWeapon *weapon = lw_entity_get_weapon_at(actor, i);
-        for (k = 0; k < lw_weapon_get_passive_effects_count(weapon); ++k)
-            if (lw_effect_parameters_get_id(&lw_weapon_get_passive_effects(weapon)[k]) ==
-                CRITICAL_TO_HEAL) return 1;
+        for (k = 0; k < lw_weapon_get_passive_effects_count(weapon); ++k) {
+            int id = lw_effect_parameters_get_id(&lw_weapon_get_passive_effects(weapon)[k]);
+            if (id >= 0 && id < 64) found |= PASSIVE(id);
+        }
     }
-    return 0;
+    return found;
 }
 
-static void examine(const LwAttack *attack, usefulness *use)
+/* What makes some casts worth it. */
+typedef struct {
+    uint64_t passives; /* those of the caster */
+    int kills;         /* someone is rewarded for kills */
+    int propagation;   /* someone carries a poison that propagates */
+    int summon;        /* the caster is one */
+} circumstances;
+
+/* Entities an effect can be worth reaching. */
+enum { ON_CASTER = 1, ON_ALLIES = 2, ON_ENEMIES = 4, ON_ANYONE = 7 };
+
+typedef struct {
+    int id;
+    int targets;  /* those the engine accepts */
+    int worth;    /* ON_... */
+    int replaces; /* removes the same effect of the same item from its target */
+} effect_use;
+
+/* What a cast needs to be kept. */
+typedef struct {
+    int always;     /* whatever is reached */
+    int any_entity; /* an entity of any kind is enough */
+    int item;
+    int n_effects;
+    effect_use effects[LW_ATTACK_MAX_EFFECTS];
+} usefulness;
+
+/* Only judges effects of items that were looked at one by one. */
+static int worth_reaching(const LwAttack *attack, const LwEffectParameters *effect,
+                          const circumstances *now)
+{
+    uint64_t fed; /* passive effects that make damage to the caster worth something */
+    switch (lw_effect_parameters_get_id(effect)) {
+    case LW_EFFECT_TYPE_SHACKLE_MP:
+    case LW_EFFECT_TYPE_SHACKLE_TP:
+    case LW_EFFECT_TYPE_SHACKLE_STRENGTH:
+    case LW_EFFECT_TYPE_SHACKLE_AGILITY:
+    case LW_EFFECT_TYPE_SHACKLE_WISDOM:
+        return ON_ENEMIES;
+    case LW_EFFECT_TYPE_ADD_STATE:
+        return (int)lw_effect_parameters_get_value1(effect) == LW_ENTITY_STATE_UNHEALABLE
+            ? ON_ENEMIES : ON_ANYONE;
+    case LW_EFFECT_TYPE_HEAL:
+    case LW_EFFECT_TYPE_VITALITY:
+    case LW_EFFECT_TYPE_NOVA_VITALITY:
+        /* Life given to an enemy can change which poison kills it. */
+        return now->kills ? ON_ANYONE : ON_CASTER | ON_ALLIES;
+    case LW_EFFECT_TYPE_RAW_BUFF_MAGIC:
+        /* A poison that propagates can come back to the enemy that cast it, with the
+         * magic it then has. */
+        return now->propagation ? ON_ANYONE : ON_CASTER | ON_ALLIES;
+    case LW_EFFECT_TYPE_RAW_BUFF_TP:
+    case LW_EFFECT_TYPE_RAW_BUFF_STRENGTH:
+    case LW_EFFECT_TYPE_RAW_BUFF_SCIENCE:
+    case LW_EFFECT_TYPE_RAW_BUFF_AGILITY:
+    case LW_EFFECT_TYPE_RAW_BUFF_RESISTANCE:
+    case LW_EFFECT_TYPE_RAW_BUFF_WISDOM:
+    case LW_EFFECT_TYPE_REMOVE_SHACKLES:
+        return ON_CASTER | ON_ALLIES;
+    case LW_EFFECT_TYPE_POISON:
+        /* From the caster to the enemies around. */
+        if (lw_attack_get_effect_parameters_by_type(attack, LW_EFFECT_TYPE_PROPAGATION))
+            return ON_ANYONE;
+        fed = PASSIVE(POISON_TO_SCIENCE) | PASSIVE(NOVA_DAMAGE_TO_MAGIC);
+        break;
+    case LW_EFFECT_TYPE_NOVA_DAMAGE:
+        fed = PASSIVE(NOVA_DAMAGE_TO_MAGIC);
+        break;
+    case LW_EFFECT_TYPE_DAMAGE:
+    case LW_EFFECT_TYPE_LIFE_DAMAGE:
+    case LW_EFFECT_TYPE_VULNERABILITY:
+    case LW_EFFECT_TYPE_ABSOLUTE_VULNERABILITY:
+        fed = PASSIVE(DAMAGE_TO_ABSOLUTE_SHIELD) | PASSIVE(DAMAGE_TO_STRENGTH) |
+              PASSIVE(LW_EFFECT_TYPE_DAMAGE_TO_RESISTANCE) | PASSIVE(NOVA_DAMAGE_TO_MAGIC);
+        break;
+    default:
+        return ON_ANYONE;
+    }
+    /* A summon may want to die: it frees a place. */
+    return (now->passives & fed) || now->summon ? ON_ANYONE : ON_ALLIES | ON_ENEMIES;
+}
+
+static void examine(const LwAttack *attack, leekrl_trim trim, const circumstances *now,
+                    usefulness *use)
 {
     int i;
-    use->always = use->any_entity = use->n_targets = 0;
+    use->always = use->any_entity = use->n_effects = 0;
+    use->item = lw_attack_get_item_id(attack);
     for (i = 0; i < lw_attack_get_effects_count(attack); ++i) {
-        const LwEffectParameters *effect = &attack->effects[i];
+        const LwEffectParameters *effect = &attack->effects[i], *reached = effect;
+        int id = lw_effect_parameters_get_id(effect);
         int modifiers = lw_effect_parameters_get_modifiers(effect);
-        switch (lw_effect_parameters_get_id(effect)) {
+        int worth = trim >= LEEKRL_TRIM_HARMFUL
+            ? worth_reaching(attack, effect, now) : ON_ANYONE;
+        effect_use *added;
+        switch (id) {
         case LW_EFFECT_TYPE_SUMMON:
         case LW_EFFECT_TYPE_RESURRECT:
         case LW_EFFECT_TYPE_TELEPORT:
@@ -537,26 +629,60 @@ static void examine(const LwAttack *attack, usefulness *use)
         case LW_EFFECT_TYPE_PUSH:
         case LW_EFFECT_TYPE_REPEL:
             use->any_entity = 1;
-            break;
+            continue;
         case LW_EFFECT_TYPE_PROPAGATION: /* only modifies the other effects */
+            continue;
+        case LW_EFFECT_TYPE_STEAL_ABSOLUTE_SHIELD:
+        case LW_EFFECT_TYPE_STEAL_LIFE:
+            /* Gives what the previous effect did: nothing if it reached nobody. */
+            if (!i) continue;
+            reached = &attack->effects[i - 1];
+            worth = ON_ANYONE;
             break;
         default:
-            if ((modifiers & LW_MODIFIER_ON_CASTER) &&
-                !(modifiers & LW_MODIFIER_MULTIPLIED_BY_TARGETS)) {
+            if (!(modifiers & LW_MODIFIER_ON_CASTER)) break;
+            if (modifiers & LW_MODIFIER_MULTIPLIED_BY_TARGETS) {
+                worth = ON_ANYONE; /* each target counts for the caster */
+            } else if (worth & ON_CASTER) {
                 use->always = 1;
                 return;
+            } else {
+                continue;
             }
-            use->targets[use->n_targets++] = lw_effect_parameters_get_targets(effect);
         }
+        added = &use->effects[use->n_effects++];
+        added->id = id;
+        added->targets = lw_effect_parameters_get_targets(reached);
+        added->worth = worth;
+        added->replaces = lw_effect_parameters_get_turns(effect) != 0 &&
+            (!(modifiers & LW_MODIFIER_STACKABLE) || id == LW_EFFECT_TYPE_ADD_STATE);
     }
+}
+
+static int has_effect(const LwEntity *entity, int id, int item)
+{
+    int i;
+    for (i = 0; i < lw_entity_get_effects_count(entity); ++i) {
+        const LwEffect *effect = lw_entity_get_effect_at(entity, i);
+        const LwAttack *attack = lw_effect_get_attack(effect);
+        if (lw_effect_get_id(effect) == id && attack && lw_attack_get_item_id(attack) == item)
+            return 1;
+    }
+    return 0;
 }
 
 static int accepts(const usefulness *use, LwEntity *actor, LwEntity *entity)
 {
+    int side = entity == actor ? ON_CASTER
+        : lw_entity_get_team(entity) == lw_entity_get_team(actor) ? ON_ALLIES : ON_ENEMIES;
     int i;
     if (use->any_entity) return 1;
-    for (i = 0; i < use->n_targets; ++i)
-        if (lw_attack_filter_target(use->targets[i], actor, entity)) return 1;
+    for (i = 0; i < use->n_effects; ++i) {
+        const effect_use *effect = &use->effects[i];
+        if (lw_attack_filter_target(effect->targets, actor, entity) &&
+            ((effect->worth & side) ||
+             (effect->replaces && has_effect(entity, effect->id, use->item)))) return 1;
+    }
     return 0;
 }
 
@@ -607,7 +733,8 @@ static int useful(LwState *state, LwEntity *actor, const castable *item,
 
 static leekrl_action_status mask_item(const leekrl_action_catalog *catalog, LwState *state,
                                       LwEntity *actor, leekrl_action_kind kind, int id,
-                                      sight_cache *sight, int trim, uint8_t *mask)
+                                      sight_cache *sight, leekrl_trim trim,
+                                      const circumstances *now, uint8_t *mask)
 {
     const catalog_item *entry = find_item(catalog, kind, id);
     LwMap *map = lw_state_get_map(state);
@@ -620,7 +747,7 @@ static leekrl_action_status mask_item(const leekrl_action_catalog *catalog, LwSt
     status = check_item(state, actor, kind, id, &item);
     if (status == LEEKRL_ACTION_ILLEGAL) return LEEKRL_ACTION_OK;
     if (status != LEEKRL_ACTION_OK) return status;
-    if (trim) examine(item.attack, &use);
+    if (trim) examine(item.attack, trim, now, &use);
     for (i = entry->first; i < entry->first + entry->count; ++i) {
         LwCell *target = cell_offset(map, from, catalog->actions[i].dx, catalog->actions[i].dy);
         if (!target) continue;
@@ -633,8 +760,8 @@ static leekrl_action_status mask_item(const leekrl_action_catalog *catalog, LwSt
 }
 
 static leekrl_action_status catalog_mask(const leekrl_action_catalog *catalog,
-                                         LwFight *fight, LwEntity *actor, int trim,
-                                         uint8_t *mask)
+                                         LwFight *fight, LwEntity *actor,
+                                         leekrl_trim trim, uint8_t *mask)
 {
     LwState *state;
     LwMap *map;
@@ -642,8 +769,10 @@ static leekrl_action_status catalog_mask(const leekrl_action_catalog *catalog,
     movement_routes routes = {0};
     sight_cache sight;
     leekrl_action_status status;
+    circumstances now = {0};
     int i;
-    if (!catalog || !fight || !actor || !mask) return LEEKRL_ACTION_INVALID_ARGUMENT;
+    if (!catalog || !fight || !actor || !mask || (unsigned)trim > LEEKRL_TRIM_HARMFUL)
+        return LEEKRL_ACTION_INVALID_ARGUMENT;
     status = check_actor(fight, actor);
     if (status != LEEKRL_ACTION_OK) return status;
     state = lw_fight_get_state(fight);
@@ -659,19 +788,29 @@ static leekrl_action_status catalog_mask(const leekrl_action_catalog *catalog,
                           [cell->x - from->x + LEEKRL_MAX_MOVE_DISTANCE]] = 1;
     }
     memset(sight.visible, -1, sizeof(sight.visible));
-    if (trim && reacts_to_critical(actor)) trim = 0;
+    now.passives = passive_effects(actor);
+    now.summon = lw_entity_is_summon(actor);
+    for (i = 0; i < state->order.n_leeks; ++i) {
+        const LwEntity *entity = state->order.leeks[i];
+        int k;
+        now.kills |= (passive_effects(entity) & PASSIVE(KILL_TO_TP)) != 0;
+        for (k = 0; k < lw_entity_get_effects_count(entity); ++k)
+            now.propagation |= lw_entity_get_effect_at(entity, k)->propagate > 0;
+    }
+    /* Casts of this entity can matter by themselves, through critical hits. */
+    if (now.passives & PASSIVE(CRITICAL_TO_HEAL)) trim = LEEKRL_TRIM_NOTHING;
     for (i = 0; i < lw_entity_get_weapons_count(actor); ++i) {
         LwWeapon *weapon = lw_entity_get_weapon_at(actor, i);
         if (!weapon) continue;
         status = mask_item(catalog, state, actor, LEEKRL_ACTION_WEAPON,
-                           lw_weapon_get_id(weapon), &sight, trim, mask);
+                           lw_weapon_get_id(weapon), &sight, trim, &now, mask);
         if (status != LEEKRL_ACTION_OK) return status;
     }
     for (i = 0; i < lw_entity_get_chips_count(actor); ++i) {
         LwChip *chip = lw_entity_get_chip_at(actor, i);
         if (!chip) continue;
         status = mask_item(catalog, state, actor, LEEKRL_ACTION_CHIP,
-                           lw_chip_get_id(chip), &sight, trim, mask);
+                           lw_chip_get_id(chip), &sight, trim, &now, mask);
         if (status != LEEKRL_ACTION_OK) return status;
     }
     return LEEKRL_ACTION_OK;
@@ -681,14 +820,14 @@ leekrl_action_status leekrl_action_catalog_mask(const leekrl_action_catalog *cat
                                                 LwFight *fight, LwEntity *actor,
                                                 uint8_t *mask)
 {
-    return catalog_mask(catalog, fight, actor, 0, mask);
+    return catalog_mask(catalog, fight, actor, LEEKRL_TRIM_NOTHING, mask);
 }
 
-leekrl_action_status leekrl_action_catalog_useful_mask(const leekrl_action_catalog *catalog,
-                                                       LwFight *fight, LwEntity *actor,
-                                                       uint8_t *mask)
+leekrl_action_status leekrl_action_catalog_trimmed_mask(const leekrl_action_catalog *catalog,
+                                                        LwFight *fight, LwEntity *actor,
+                                                        leekrl_trim trim, uint8_t *mask)
 {
-    return catalog_mask(catalog, fight, actor, 1, mask);
+    return catalog_mask(catalog, fight, actor, trim, mask);
 }
 
 leekrl_action_status leekrl_action_mask(LwFight *fight, LwEntity *actor,

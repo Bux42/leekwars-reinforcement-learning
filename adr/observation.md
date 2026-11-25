@@ -189,7 +189,56 @@ masked, except when it affects its caster anyway (a sword's shield), summons or 
 or when the caster holds a weapon that reacts to its critical hits. 518,000 masked casts
 were executed on cloned fights, none had an effect. 84% of legal casts are masked.
 
+What `j_laser` and `quantum_rifle` steal for their caster depends on who they reach: they
+are masked too when they reach nobody.
+
 Casts that reach someone but achieve nothing (healing a leek at full life) are kept.
+
+## Harmful casts are masked
+
+Date: 2026-11-24. Status: accepted, after a review item by item. `--trim useless` goes
+without.
+
+Casts that can only harm their own team, or only help the enemy, are masked. One that has
+anything else to offer stays, like a `tranquilizer` that reaches an ally and an enemy.
+
+| Masked | Items |
+|---|---|
+| It only reaches its team, and only takes TP, MP or characteristics from it, or makes it unhealable | `tranquilizer`, `soporific`, `slow_down`, `ball_and_chain`, `fracture`, `crushing`, `brainwashing`, `hemorrhage`, `plutonium_bazooka` |
+| It only reaches enemies, and only gives them life, maximum life, TP or characteristics, or removes their shackles | `bandage`, `cure`, `drip`, `therapy`, `regeneration`, `explorer_rifle`, `armoring`, `elevation`, `mutation`, `transmutation`, `knowledge`, `prism`, `wizardry`, `manumission` |
+| It only harms its caster, a leek | `shock`, `pebble`, `ice`, `spark`, `flash`, `devil_strike`, `plasma`, `toxin`, `plague`, `gazor`, `desintegration` on itself; `punishment`, `dark_katana` on an empty cell |
+
+Such a cast can still be a strategy. It is kept in these cases:
+
+| Kept | Why |
+|---|---|
+| The caster has `unstable_destroyer` | Its critical hits heal it, whatever it casts |
+| The target already has the effect of the same item, and it does not stack: `tranquilizer`, `hemorrhage`, `knowledge`, `prism`, `wizardry` | The new effect replaces it, even that of the other team: a weak `tranquilizer` on oneself removes a strong one |
+| Damage to a leek with `revoked_m_laser`, `plutonium_bazooka`, `mysterious_electrisor` or `unbridled_gazor` | It gives strength, resistance, a shield or magic |
+| Poison on a leek with `illicit_grenade_launcher` or `unbridled_gazor` | It gives science or magic |
+| Maximum life taken from a leek with `unbridled_gazor` | It gives magic |
+| `covid` on oneself | It propagates, and keeps a stronger one away |
+| A summon that harms itself | Its death frees a place |
+| Life or maximum life given to an enemy while a living leek has `enhanced_lightninger` | It changes which poison kills, hence who gets the TP |
+| Magic given to an enemy while someone carries `covid` | Its own `covid` can come back to it, with its magic of the moment |
+
+Having the weapon is enough, in hand or not. Kept on purpose: harming one's own summons (life
+steal, places, the TP of `enhanced_lightninger`), `bramble` on an enemy, `superinfection`,
+`liberation`, `neutronium`, `repotting`, vulnerability, and whatever moves someone.
+
+Checked by `tests/test_useful.c`, where leeks hold these items in two fights out of three. The
+list is written there a second time, item by item: every cast of every decision must be
+masked or kept as it says, so an item added to the game and masked by these rules fails the
+test until it is looked at. Masked casts are also followed on two clones of the fight, with and
+without the cast, where everyone then only ends their turns: nothing must ever be better for
+the caster's team, nor worse for its enemies. 10.6 million masked casts were followed, for 32
+turns on average, over 60,000 fights: none helped. The last two exceptions were found this way.
+
+This cannot see what only shows when someone acts, for example keeping a harmless enemy
+summon alive so that it goes on holding a place, or blocking a corridor.
+
+Results against a random opponent cannot be compared with those of earlier runs: it no longer
+kills itself as much.
 
 ## One independent output per action
 

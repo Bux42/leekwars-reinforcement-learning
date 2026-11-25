@@ -70,7 +70,9 @@ list of actions) checks the current state, inventory,
 resources, cooldowns, range, line of sight and applicable generator rules.
 Recompute after every action. `leekrl_action_execute` rechecks and executes
 the selected action; return from the generator's AI callback to end a turn.
-A valid cast need not hit an entity or have a useful effect. Summons require
+A valid cast need not hit an entity or have a useful effect:
+`leekrl_action_catalog_trimmed_mask` leaves out useless casts, and those that can only
+harm their own team or help the enemy (see `adr/observation.md`). Summons require
 registered templates. They get an AI, so they play turns of their own.
 
 `leekrl_action_catalog_create` builds a fixed catalog from **all currently

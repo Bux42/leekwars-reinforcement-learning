@@ -113,15 +113,34 @@ leekrl_action_status leekrl_action_catalog_mask(const leekrl_action_catalog *cat
                                                 struct LwFight *fight,
                                                 struct LwEntity *actor, uint8_t *mask);
 
+/* Casts left out of a mask. Each level also leaves out those of the previous one. */
+typedef enum {
+    LEEKRL_TRIM_NOTHING,
+    LEEKRL_TRIM_USELESS, /* that cannot affect anything */
+    LEEKRL_TRIM_HARMFUL  /* that can only harm their team or help the enemy */
+} leekrl_trim;
+
 /*
- * Same, without the casts that cannot affect anything: those whose area holds no
- * entity any of their effects accepts. Kept: casts with an effect on the caster
- * whatever the target (a sword's shield), summons, teleports, and every cast of
+ * Same as leekrl_action_catalog_mask, without some casts. Every cast is kept for
  * a caster holding a weapon that reacts to its critical hits.
+ *
+ * Useless: the area holds no entity any of the effects accepts. Kept: casts with
+ * an effect on the caster whatever the target (a sword's shield), summons and
+ * teleports.
+ *
+ * Harmful: every effect either
+ * - takes TP, MP or characteristics from its own team, or makes it unhealable;
+ * - heals or strengthens an enemy, or removes its shackles;
+ * - damages, poisons or weakens nobody but the caster, a leek.
+ * Kept: effects that replace one their target already has from the same item;
+ * damage that a weapon of the caster turns into something else; poison that
+ * propagates; life given to an enemy when a weapon rewards kills, and magic when
+ * such a poison is around. See adr/observation.md.
  */
-leekrl_action_status leekrl_action_catalog_useful_mask(const leekrl_action_catalog *catalog,
-                                                       struct LwFight *fight,
-                                                       struct LwEntity *actor, uint8_t *mask);
+leekrl_action_status leekrl_action_catalog_trimmed_mask(const leekrl_action_catalog *catalog,
+                                                        struct LwFight *fight,
+                                                        struct LwEntity *actor,
+                                                        leekrl_trim trim, uint8_t *mask);
 
 /*
  * Revalidate and execute one action. engine_result receives the generator's

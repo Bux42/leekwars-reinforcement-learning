@@ -28,7 +28,7 @@ from .builds import load_known_builds
 from .model import Policy
 from .native import ROOT
 from .ppo import Rollout, unpack, update
-from .vec import EPISODE_FIELDS, REWARD_PARTS, WAIT, VecEnv
+from .vec import EPISODE_FIELDS, REWARD_PARTS, TRIMS, WAIT, VecEnv
 
 
 @dataclass
@@ -43,7 +43,7 @@ class Config:
     known_builds: str = ""         # file, builds/known_builds.json by default
     known_probability: float = 0.01
     skew: float = 2.0
-    trim_useless: bool = True      # mask casts that cannot affect anything
+    trim: str = "harmful"          # casts masked: nothing, useless, or harmful ones too
     opponent: str = "self"         # self, or random or idle: not learned
     # Network
     branch: int = 128
@@ -227,7 +227,7 @@ def evaluate(model, config, known, fights, seed, opponents=("random",), greedy=F
     winner, turns = np.zeros(envs, int), np.zeros(envs)
     with VecEnv(envs, threads=config.env_threads, seed=seed, known_builds=known,
                 known_probability=config.known_probability, skew=config.skew,
-                trim_useless=config.trim_useless) as env:
+                trim=config.trim) as env:
         env.reset()
         while playing.any():
             mine = env.team == side
@@ -355,7 +355,7 @@ def train(config, folder=None):
     generator = torch.Generator().manual_seed(config.seed)
     env = VecEnv(config.envs, threads=config.env_threads, seed=config.seed,
                  known_builds=known, known_probability=config.known_probability,
-                 skew=config.skew, trim_useless=config.trim_useless)
+                 skew=config.skew, trim=config.trim)
     details = {"data_hash": env.data_hash, "commit": commit(),
                "known_names": env.known_names}
     model = Policy(env.actions, env.float_count, config.branch, config.hidden,
@@ -422,7 +422,7 @@ def train(config, folder=None):
                     peek.write(folder / f"peek_{step:06d}.html",
                                peek.record(model_cpu, config.peek_fights, 1_000_033, known,
                                            known_probability=config.known_probability,
-                                           skew=config.skew, trim_useless=config.trim_useless),
+                                           skew=config.skew, trim=config.trim),
                                f"{config.name}, update {step}, against itself")
                 if last:
                     if step < config.updates:
@@ -447,6 +447,8 @@ def parse(arguments=None):
     config = Config(**vars(parser.parse_args(arguments)))
     if config.opponent not in ("self", "random", "idle"):
         parser.error("--opponent must be self, random or idle")
+    if config.trim not in TRIMS:
+        parser.error(f"--trim must be one of {', '.join(TRIMS)}")
     if config.layers < 1:
         parser.error("--layers must be at least 1")
     if config.head not in ("flat", "pair"):

@@ -456,6 +456,9 @@ class LearnerTests(unittest.TestCase):
         config = parse(["--envs", "4", "--no-mask-input", "--gamma", "0.5", "--deterministic"])
         self.assertEqual((config.envs, config.mask_input, config.gamma, config.deterministic),
                          (4, False, 0.5, True))
+        self.assertEqual((config.trim, parse(["--trim", "useless"]).trim), ("harmful", "useless"))
+        with self.assertRaises(SystemExit):
+            parse(["--trim", "all"])
 
 
 if __name__ == "__main__":
