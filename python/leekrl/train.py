@@ -25,10 +25,10 @@ import numpy as np
 import torch
 
 from .builds import load_known_builds
-from .model import Policy
+from .model import Inputs, Legal, Policy
 from .native import ROOT
-from .ppo import Rollout, unpack, update
-from .vec import EPISODE_FIELDS, REWARD_PARTS, TRIMS, WAIT, VecEnv
+from .ppo import Rollout, update
+from .vec import EPISODE_FIELDS, REWARD_PARTS, TRIMS, WAIT, VecEnv, take
 
 
 @dataclass
@@ -44,6 +44,8 @@ class Config:
     known_probability: float = 0.01
     skew: float = 2.0
     trim: str = "harmful"          # casts masked: nothing, useless, or harmful ones too
+    face_enemy: bool = True        # turn the world so that the enemy leek is always there
+    repeat_moves: bool = False     # allow moving right after a move
     opponent: str = "self"         # self, or random or idle: not learned
     # Network
     branch: int = 128
@@ -66,9 +68,11 @@ class Config:
     # Run
     device: str = "auto"           # auto: cuda if available, else cpu
     torch_threads: int = 8
+    tf32: bool = True              # faster, slightly rounded multiplications on GPU
     deterministic: bool = False
     eval_every: int = 100          # updates between evaluations, 0 to disable
     eval_fights: int = 200
+    eval_opponents: str = "idle"   # among idle and random, separated by commas
     save_every: int = 50
     peek_every: int = 0            # updates between pages showing fights, 0 to disable
     peek_fights: int = 2
@@ -77,55 +81,75 @@ class Config:
     wandb_project: str = "leekwars-rl"
 
 
+def world(config):
+    """Settings of the environment, from those of a run, as a dictionary. Those that older
+    runs do not give are what they did."""
+    old = {"known_probability": 0.01, "skew": 2.0, "trim": "useless", "face_enemy": False,
+           "repeat_moves": True}
+    return {name: config.get(name, value) for name, value in old.items()}
+
+
 def seed_everything(config):
     random.seed(config.seed)
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
     torch.set_num_threads(config.torch_threads)
+    torch.backends.cuda.matmul.allow_tf32 = config.tf32
     if config.deterministic:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.benchmark = False
 
 
-def inputs(env, device, rows=slice(None)):
+def pinned(shape, dtype):
+    """Arrays that are sent faster to the GPU."""
+    return torch.zeros(shape, dtype=torch.from_numpy(np.zeros(1, dtype)).dtype,
+                       pin_memory=True).numpy()
+
+
+def allocator(device):
+    return pinned if torch.device(device).type == "cuda" else np.zeros
+
+
+def inputs(env, device, rows=None):
     """What the network needs, copied from the environment's current arrays."""
-    return (torch.tensor(env.map[rows], device=device),
-            torch.tensor(env.floats[rows], device=device),
-            unpack(torch.tensor(env.mask[rows], device=device), env.actions))
+    if rows is None:
+        legal, sizes, held, held_sizes = (env.legal_actions, env.legal_counts, env.held,
+                                          env.held_counts)
+        floats, place = env.floats, env.place
+    else:
+        legal, sizes = take(env.legal_actions, env.legal_counts, rows)
+        held, held_sizes = take(env.held, env.held_counts, rows)
+        floats, place = env.floats[rows], env.place[rows]
+    return Inputs(torch.tensor(floats, device=device), torch.tensor(place, device=device),
+                  torch.tensor(held, device=device), torch.tensor(held_sizes),
+                  Legal(torch.tensor(legal, device=device), torch.tensor(sizes)))
 
 
-BIT_COUNTS = np.array([bin(byte).count("1") for byte in range(256)], np.int32)
+def random_actions(env, rows, generator):
+    """A uniform legal action for some environments."""
+    legal, sizes = take(env.legal_actions, env.legal_counts, rows)
+    uniform = torch.rand(len(sizes), generator=generator, dtype=torch.float64).numpy()
+    return legal[sizes.cumsum() - sizes + (uniform * sizes).astype(np.int64)].astype(np.int64)
 
 
-def random_actions(mask, generator):
-    """A uniform legal action per row of packed bits."""
-    index = np.arange(len(mask))
-    ends = BIT_COUNTS[mask].cumsum(1)       # legal actions up to each byte
-    # Which one of the legal actions, then the byte and the bit that hold it.
-    picked = (torch.rand(len(mask), generator=generator, dtype=torch.float64).numpy()
-              * ends[:, -1]).astype(np.int64)
-    byte = (ends > picked[:, None]).argmax(1)
-    picked -= ends[index, byte] - BIT_COUNTS[mask[index, byte]]
-    bits = np.unpackbits(mask[index, byte][:, None], axis=1, bitorder="little")
-    return byte * 8 + (bits.cumsum(1) > picked[:, None]).argmax(1)
-
-
-def scripted(opponent, mask, generator):
+def scripted(opponent, env, rows, generator):
     """Actions of an opponent that does not learn: random, or idle (ends its turns)."""
     if opponent == "random":
-        return random_actions(mask, generator)
-    return np.zeros(len(mask), np.int64)
+        return random_actions(env, rows, generator)
+    return np.zeros(len(rows), np.int64)
 
 
 def chosen(player, env, rows, generator, greedy=False):
     """Actions of a player, scripted or a network, for some environments."""
     if isinstance(player, str):
-        return scripted(player, env.mask[rows], generator)
+        return scripted(player, env, rows, generator)
     with torch.no_grad():
-        distribution, _ = player(*inputs(env, next(player.parameters()).device, rows))
+        seen = inputs(env, next(player.parameters()).device, rows)
+        distribution, _ = player(seen)
         position = distribution.best() if greedy else distribution.sample(generator)
-        return distribution.legal.actions[position].cpu().numpy()
+        legal, _ = take(env.legal_actions, env.legal_counts, rows)
+        return legal[position.numpy()].astype(np.int64)
 
 
 class Fights:
@@ -190,22 +214,22 @@ def collect(env, model, rollout, config, generator, fights):
     parts = np.zeros(len(REWARD_PARTS))
     for t in range(rollout.steps):
         with torch.no_grad():
-            distribution, value = model(*rollout.save(t, env))
+            distribution, rollout.estimates[t] = model(rollout.save(t, env))
             position = distribution.sample(generator)
-            actions = distribution.legal.actions[position].cpu().numpy()
-            rollout.log_probs[t] = distribution.log_probs[position]
-        rollout.values[t] = value.cpu().numpy()
+            rollout.log_probs[t] = distribution.log_probs[position.to(rollout.device)]
+            rollout.choices[t] = (position - distribution.legal.starts).to(rollout.device)
+        actions = env.legal_actions[position.numpy()].astype(np.int64)
         if config.opponent != "self":
             # Alternate sides: what is learned on one does not carry to the other.
             other = env.team != np.arange(env.envs) % 2
-            actions = np.where(other, scripted(config.opponent, env.mask, generator), actions)
+            rows = np.arange(env.envs)
+            actions = np.where(other, scripted(config.opponent, env, rows, generator), actions)
             rollout.trained[t] = ~other
-        rollout.actions[t] = torch.from_numpy(actions).to(rollout.device)
         env.step(actions)
         fights.collect(env)
         parts += np.abs(env.rewards).mean(0)
     with torch.no_grad():
-        _, value = model(*inputs(env, device))
+        _, value = model(inputs(env, device))
     rollout.finish(env, value.cpu().numpy(), config.gamma, config.lam)
     return {f"rewards/mean_abs_{name}": float(total / rollout.steps)
             for name, total in zip(REWARD_PARTS, parts) if name in ("life", "total_life",
@@ -225,9 +249,9 @@ def evaluate(model, config, known, fights, seed, opponents=("random",), greedy=F
     generator = torch.Generator().manual_seed(seed)
     playing = np.ones(envs, bool)
     winner, turns = np.zeros(envs, int), np.zeros(envs)
+    device = next(model.parameters()).device
     with VecEnv(envs, threads=config.env_threads, seed=seed, known_builds=known,
-                known_probability=config.known_probability, skew=config.skew,
-                trim=config.trim) as env:
+                allocate=allocator(device), **world(asdict(config))) as env:
         env.reset()
         while playing.any():
             mine = env.team == side
@@ -354,8 +378,7 @@ def train(config, folder=None):
     device = torch.device(config.device)
     generator = torch.Generator().manual_seed(config.seed)
     env = VecEnv(config.envs, threads=config.env_threads, seed=config.seed,
-                 known_builds=known, known_probability=config.known_probability,
-                 skew=config.skew, trim=config.trim)
+                 known_builds=known, allocate=allocator(device), **world(asdict(config)))
     details = {"data_hash": env.data_hash, "commit": commit(),
                "known_names": env.known_names}
     model = Policy(env.actions, env.float_count, config.branch, config.hidden,
@@ -369,10 +392,13 @@ def train(config, folder=None):
         settings = {"layers": 2, **data["settings"]}    # older ones do not say
         if data["data_hash"] != env.data_hash or settings != model.settings:
             raise ValueError("the checkpoint was made with other game data or another network")
+        if world(data["config"])["face_enemy"] != config.face_enemy:
+            raise ValueError("the checkpoint was made with the world turned otherwise")
         model.load_state_dict(data["model"])
         optimizer.load_state_dict(data["optimizer"])
         start, decisions, fights.total = data["update"], data["decisions"], data["fights"]
     log = Log(config, folder, details)
+    opponents = [name for name in config.eval_opponents.split(",") if name]
     rollout = Rollout(env, config.steps, device)
     history = []
     env.reset()
@@ -402,9 +428,8 @@ def train(config, folder=None):
                     "time/collect_seconds": collected - began,
                     "time/update_seconds": ended - collected})
                 last = step == config.updates or bool(stop)
-                if config.eval_every and (step % config.eval_every == 0 or last):
+                if opponents and config.eval_every and (step % config.eval_every == 0 or last):
                     began = time.perf_counter()
-                    opponents = ("idle", "random")
                     for opponent, result in zip(opponents, evaluate(
                             model, config, known, config.eval_fights, 1_000_003, opponents)):
                         for name, value in result.items():
@@ -421,8 +446,7 @@ def train(config, folder=None):
                     model_cpu = model if config.device == "cpu" else copy.deepcopy(model).cpu()
                     peek.write(folder / f"peek_{step:06d}.html",
                                peek.record(model_cpu, config.peek_fights, 1_000_033, known,
-                                           known_probability=config.known_probability,
-                                           skew=config.skew, trim=config.trim),
+                                           **world(asdict(config))),
                                f"{config.name}, update {step}, against itself")
                 if last:
                     if step < config.updates:
@@ -451,6 +475,8 @@ def parse(arguments=None):
         parser.error(f"--trim must be one of {', '.join(TRIMS)}")
     if config.layers < 1:
         parser.error("--layers must be at least 1")
+    if not {"idle", "random"}.issuperset(filter(None, config.eval_opponents.split(","))):
+        parser.error("--eval-opponents must be among idle and random")
     if config.head not in ("flat", "pair"):
         parser.error("--head must be flat or pair")
     if config.wandb not in ("disabled", "offline", "online"):

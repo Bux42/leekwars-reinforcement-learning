@@ -177,7 +177,12 @@ const leekrl_action_catalog *leekrl_battle_catalog(const leekrl_battle *battle)
 static int observe(leekrl_battle *battle, LwEntity *actor, float *out)
 {
     size_t i, n = leekrl_observer_float_count(battle->observer);
-    if (!leekrl_observe(battle->observer, battle->fight, actor, out, battle->map,
+    leekrl_observation observation = {0};
+    int16_t held[LEEKRL_OBS_MAX_HELD];
+    observation.floats = out;
+    observation.map = battle->map;
+    observation.held = held;
+    if (!leekrl_observe(battle->observer, battle->fight, actor, 0, NULL, &observation,
                         battle->error, sizeof(battle->error))) return -1;
     for (i = 0; i < LEEKRL_OBS_MAP_CELLS; ++i) out[n + i] = (float)battle->map[i];
     return 0;

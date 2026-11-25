@@ -31,6 +31,8 @@ typedef struct {
     int ready;
     int distance[LW_MAP_MAX_CELLS];
     int parent[LW_MAP_MAX_CELLS];
+    int reached[LW_MAP_MAX_CELLS]; /* by distance, the start first */
+    int n_reached;
 } movement_routes;
 
 /* An item and its actions: actions[first] to actions[first + count - 1]. */
@@ -299,7 +301,7 @@ static int valid_descriptor(const leekrl_action *action)
 
 static int build_movement_routes(LwMap *map, LwEntity *actor, movement_routes *routes)
 {
-    int queue[LW_MAP_MAX_CELLS], head = 0, tail = 0, i;
+    int *queue = routes->reached, head = 0, tail = 0, i;
     int limit = lw_entity_get_mp(actor);
     LwCell *from = lw_entity_get_cell(actor);
     int start = lw_cell_get_id(from);
@@ -310,6 +312,7 @@ static int build_movement_routes(LwMap *map, LwEntity *actor, movement_routes *r
         routes->parent[i] = -1;
     }
     routes->ready = 1;
+    routes->n_reached = 0;
     if (limit > LEEKRL_MAX_MOVE_DISTANCE) limit = LEEKRL_MAX_MOVE_DISTANCE;
     if (limit <= 0 || lw_entity_has_state(actor, LW_ENTITY_STATE_STATIC) ||
         lw_entity_has_state(actor, LW_ENTITY_STATE_ROOTED)) return 1;
@@ -331,6 +334,7 @@ static int build_movement_routes(LwMap *map, LwEntity *actor, movement_routes *r
             queue[tail++] = next;
         }
     }
+    routes->n_reached = tail;
     return 1;
 }
 
@@ -398,12 +402,13 @@ static leekrl_action_status check_item(LwState *state, LwEntity *actor,
         ? LEEKRL_ACTION_ILLEGAL : LEEKRL_ACTION_OK;
 }
 
-/* sight may be NULL. Otherwise it must belong to this map state and cell. */
+/* sight may be NULL. Otherwise it must belong to this map state and cell, and the
+ * target come from the catalog: its range and direction are then known to be right. */
 static int can_reach(LwMap *map, LwCell *from, LwCell *target, const LwAttack *attack,
                      sight_cache *sight)
 {
     signed char *visible;
-    if (!lw_map_verify_range(map, from, target, attack)) return 0;
+    if (!sight && !lw_map_verify_range(map, from, target, attack)) return 0;
     /* First-in-line attacks ignore one entity: their sight is not shared. */
     if (!sight || !lw_attack_need_los(attack) ||
         lw_attack_get_area_id(attack) == LW_AREA_TYPE_FIRST_IN_LINE)
@@ -748,6 +753,7 @@ static int accepts(const usefulness *use, LwEntity *actor, LwEntity *entity)
 static int area_reach(int area)
 {
     switch (area) {
+    case LW_AREA_TYPE_SINGLE_CELL: return 0;
     case LW_AREA_TYPE_CIRCLE1: return 1;
     case LW_AREA_TYPE_CIRCLE2: case LW_AREA_TYPE_AREA_PLUS_2: case LW_AREA_TYPE_X_1:
     case LW_AREA_TYPE_SQUARE_1: return 2;
@@ -758,35 +764,102 @@ static int area_reach(int area)
     }
 }
 
-static int useful(LwState *state, LwEntity *actor, const castable *item,
-                  const usefulness *use, LwCell *target)
+/* Whether a fixed-shape area holds the cell at (dx, dy) from its center. */
+static int in_area(int area, int dx, int dy)
+{
+    int reach = area_reach(area);
+    dx = abs(dx);
+    dy = abs(dy);
+    if (dx + dy > reach) return 0;
+    switch (area) {
+    case LW_AREA_TYPE_AREA_PLUS_2: case LW_AREA_TYPE_AREA_PLUS_3: return !dx || !dy;
+    case LW_AREA_TYPE_X_1: case LW_AREA_TYPE_X_2: case LW_AREA_TYPE_X_3: return dx == dy;
+    case LW_AREA_TYPE_SQUARE_1: case LW_AREA_TYPE_SQUARE_2:
+        return dx <= reach / 2 && dy <= reach / 2;
+    default: return 1;
+    }
+}
+
+/* Entities an item is worth reaching, as far as its range and area allow. */
+typedef struct {
+    int n;
+    LwCell *cells[LW_ORDER_MAX_ENTITIES];
+} candidates;
+
+static void find_candidates(LwState *state, LwEntity *actor, const LwAttack *attack,
+                            const usefulness *use, candidates *found)
+{
+    LwCell *from = lw_entity_get_cell(actor);
+    int reach = area_reach(lw_attack_get_area_id(attack)), i;
+    int limit = lw_attack_get_max_range(attack) + reach;
+    found->n = 0;
+    for (i = 0; i < state->order.n_leeks; ++i) {
+        LwEntity *entity = state->order.leeks[i];
+        LwCell *cell = lw_entity_get_cell(entity);
+        if (!cell || lw_entity_is_dead(entity) ||
+            (reach >= 0 && lw_pathfinding_get_case_distance(from, cell) > limit) ||
+            !accepts(use, actor, entity)) continue;
+        found->cells[found->n++] = cell;
+    }
+}
+
+/* Whether a cast has a candidate in its area. */
+static int useful(LwState *state, LwEntity *actor, const LwAttack *attack,
+                  const usefulness *use, const candidates *found, LwCell *target)
 {
     LwMap *map = lw_state_get_map(state);
-    int area = lw_attack_get_area_id(item->attack), reach, i, n;
+    int area = lw_attack_get_area_id(attack), i, n;
     LwCell cells[64];
-    if (use->always) return 1;
-    if (area == LW_AREA_TYPE_SINGLE_CELL) {
-        LwEntity *entity = lw_cell_get_player(target, map);
-        return entity && !lw_entity_is_dead(entity) && accepts(use, actor, entity);
+    if (area_reach(area) >= 0) {
+        for (i = 0; i < found->n; ++i)
+            if (in_area(area, found->cells[i]->x - target->x, found->cells[i]->y - target->y))
+                return 1;
+        return 0;
     }
-    /* Cheap check first: is any accepted entity near enough? */
-    reach = area_reach(area);
-    if (reach >= 0) {
-        for (i = 0; i < state->order.n_leeks; ++i) {
-            LwEntity *entity = state->order.leeks[i];
-            LwCell *cell = lw_entity_get_cell(entity);
-            if (cell && lw_pathfinding_get_case_distance(target, cell) <= reach &&
-                accepts(use, actor, entity)) break;
-        }
-        if (i == state->order.n_leeks) return 0;
-    }
-    n = lw_area_get_area(&item->attack->area, map, lw_entity_get_cell(actor), target, actor,
-                         cells, 64);
+    n = lw_area_get_area(&attack->area, map, lw_entity_get_cell(actor), target, actor, cells, 64);
     for (i = 0; i < n; ++i) {
         LwEntity *entity = lw_cell_get_player(&cells[i], map);
         if (entity && !lw_entity_is_dead(entity) && accepts(use, actor, entity)) return 1;
     }
     return 0;
+}
+
+/* Position in the catalog of the cast of an item at (dx, dy). Layouts are sorted by dy,
+ * then dx. Returns 0, the end of turn, if there is none. */
+static size_t find_slot(const leekrl_action_catalog *catalog, const catalog_item *item,
+                        int dx, int dy)
+{
+    size_t low = item->first, high = item->first + item->count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        const leekrl_action *slot = &catalog->actions[middle];
+        if (slot->dy < dy || (slot->dy == dy && slot->dx < dx)) low = middle + 1;
+        else high = middle;
+    }
+    return low < item->first + item->count && catalog->actions[low].dx == dx &&
+           catalog->actions[low].dy == dy ? low : 0;
+}
+
+size_t leekrl_action_catalog_find(const leekrl_action_catalog *catalog,
+                                  const leekrl_action *action)
+{
+    const catalog_item *item;
+    size_t found = 0;
+    if (!catalog || !action) return 0;
+    switch (action->kind) {
+    case LEEKRL_ACTION_END_TURN:
+        return 0;
+    case LEEKRL_ACTION_MOVE:
+        if (abs(action->dx) <= LEEKRL_MAX_MOVE_DISTANCE &&
+            abs(action->dy) <= LEEKRL_MAX_MOVE_DISTANCE)
+            found = catalog->move[action->dy + LEEKRL_MAX_MOVE_DISTANCE]
+                                 [action->dx + LEEKRL_MAX_MOVE_DISTANCE];
+        break;
+    default:
+        item = find_item(catalog, action->kind, action->item_id);
+        if (item) found = find_slot(catalog, item, action->dx, action->dy);
+    }
+    return found ? found : catalog->count;
 }
 
 static leekrl_action_status mask_item(const leekrl_action_catalog *catalog, LwState *state,
@@ -800,18 +873,39 @@ static leekrl_action_status mask_item(const leekrl_action_catalog *catalog, LwSt
     leekrl_action_status status;
     castable item;
     usefulness use;
+    candidates found;
     size_t i;
     if (!entry) return LEEKRL_ACTION_OK;
     status = check_item(state, actor, kind, id, &item);
     if (status == LEEKRL_ACTION_ILLEGAL) return LEEKRL_ACTION_OK;
     if (status != LEEKRL_ACTION_OK) return status;
-    if (trim) examine(item.attack, trim, now, &use);
+    if (trim) {
+        examine(item.attack, trim, now, &use);
+        if (use.always) trim = LEEKRL_TRIM_NOTHING;
+    }
+    if (trim) {
+        find_candidates(state, actor, item.attack, &use, &found);
+        if (!found.n) return LEEKRL_ACTION_OK;
+        if (lw_attack_get_area_id(item.attack) == LW_AREA_TYPE_SINGLE_CELL) {
+            int k;
+            for (k = 0; k < found.n; ++k) {
+                LwCell *target = found.cells[k];
+                i = find_slot(catalog, entry, target->x - from->x, target->y - from->y);
+                if (!i) continue;
+                status = check_target(state, actor, &item, target, sight);
+                if (status == LEEKRL_ACTION_OK) mask[i] = 1;
+                else if (status != LEEKRL_ACTION_ILLEGAL) return status;
+            }
+            return LEEKRL_ACTION_OK;
+        }
+    }
     for (i = entry->first; i < entry->first + entry->count; ++i) {
         LwCell *target = cell_offset(map, from, catalog->actions[i].dx, catalog->actions[i].dy);
         if (!target) continue;
+        /* Much cheaper than the line of sight. */
+        if (trim && !useful(state, actor, item.attack, &use, &found, target)) continue;
         status = check_target(state, actor, &item, target, sight);
-        if (status == LEEKRL_ACTION_OK)
-            mask[i] = !trim || useful(state, actor, &item, &use, target);
+        if (status == LEEKRL_ACTION_OK) mask[i] = 1;
         else if (status != LEEKRL_ACTION_ILLEGAL) return status;
     }
     return LEEKRL_ACTION_OK;
@@ -839,9 +933,8 @@ static leekrl_action_status catalog_mask(const leekrl_action_catalog *catalog,
     memset(mask, 0, catalog->count);
     mask[0] = 1;
     if (!build_movement_routes(map, actor, &routes)) return LEEKRL_ACTION_ENGINE_ERROR;
-    for (i = 0; i < map->nb_cells; ++i) {
-        const LwCell *cell = &map->cells[i];
-        if (routes.distance[i] <= 0) continue;
+    for (i = 1; i < routes.n_reached; ++i) {
+        const LwCell *cell = &map->cells[routes.reached[i]];
         mask[catalog->move[cell->y - from->y + LEEKRL_MAX_MOVE_DISTANCE]
                           [cell->x - from->x + LEEKRL_MAX_MOVE_DISTANCE]] = 1;
     }

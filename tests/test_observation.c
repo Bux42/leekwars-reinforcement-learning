@@ -5,6 +5,7 @@
 #include "leekrl/observation.h"
 #include "leekrl/plant_ai.h"
 #include "leekrl/rules.h"
+#include "leekrl/symmetry.h"
 #include "lw_bulb_template.h"
 #include "lw_chip.h"
 #include "lw_effect.h"
@@ -41,6 +42,9 @@ static char error[128];
 typedef struct {
     float f[FLOATS];
     uint8_t map[LEEKRL_OBS_MAP_CELLS];
+    int16_t held[LEEKRL_OBS_MAX_HELD];
+    int held_count;
+    int place;
 } observation;
 
 typedef struct {
@@ -59,10 +63,25 @@ static uint64_t next_random(uint64_t *state)
     return z ^ (z >> 31);
 }
 
+static int try_observe(LwFight *fight, LwEntity *actor, int symmetry,
+                       const leekrl_obstacles *obstacles, observation *o)
+{
+    leekrl_observation out = {0};
+    int ok;
+    memset(o->held, 0, sizeof(o->held));
+    out.floats = o->f;
+    out.map = o->map;
+    out.held = o->held;
+    ok = leekrl_observe(observer, fight, actor, symmetry, obstacles, &out, error, sizeof(error));
+    o->held_count = out.held_count;
+    o->place = out.place;
+    return ok;
+}
+
 static void observe(session *s, LwEntity *actor, observation *o)
 {
     memset(o, 0xAB, sizeof(*o));
-    if (!leekrl_observe(observer, &s->fight, actor, o->f, o->map, error, sizeof(error))) {
+    if (!try_observe(&s->fight, actor, 0, NULL, o)) {
         fprintf(stderr, "seed %d: %s\n", current_seed, error);
         exit(1);
     }
@@ -303,6 +322,55 @@ static void check_observation(session *s, LwEntity *actor, const observation *o)
     if (n > seen.most_entities) seen.most_entities = n;
 }
 
+/* Turned observations hold the same world, turned. Both forms of the map agree. */
+static void check_turned(session *s, LwEntity *actor, const observation *o)
+{
+    static observation t;
+    static leekrl_obstacles obstacles;
+    const int radius = LEEKRL_OBS_MAP_RADIUS;
+    int symmetry, i, x, y;
+    CHECK(leekrl_obstacles_find(&s->fight, &obstacles));
+    for (symmetry = 0; symmetry < LEEKRL_SYMMETRIES; ++symmetry) {
+        int held = 0, sum_x = 0, sum_y = 0, inside = 0;
+        CHECK(try_observe(&s->fight, actor, symmetry, &obstacles, &t));
+        for (i = 0; i < FLOATS; ++i) {
+            int offset = i - LEEKRL_OBS_ENTITIES, field = offset % LEEKRL_OBS_ENTITY_SIZE;
+            int dx, dy;
+            if (offset < 0 || i >= LEEKRL_OBS_ITEMS ||
+                (field != LEEKRL_OBS_DX && field != LEEKRL_OBS_DY)) {
+                CHECK(t.f[i] == o->f[i]);
+                continue;
+            }
+            if (field == LEEKRL_OBS_DY) continue;
+            dx = (int)lround(o->f[i] * radius);
+            dy = (int)lround(o->f[i + 1] * radius);
+            leekrl_turn(symmetry, &dx, &dy);
+            CHECK(NEAR(t.f[i] * radius, dx) && NEAR(t.f[i + 1] * radius, dy));
+        }
+        for (y = -radius; y <= radius; ++y) {
+            for (x = -radius; x <= radius; ++x) {
+                int from = leekrl_obs_map_index(x, y), dx = x, dy = y, to;
+                if (from < 0) continue;
+                leekrl_turn(symmetry, &dx, &dy);
+                to = leekrl_obs_map_index(dx, dy);
+                CHECK(to >= 0 && t.map[to] == o->map[from]);
+                if (t.map[to] == LEEKRL_CELL_OUTSIDE) continue;
+                held += t.map[to] != LEEKRL_CELL_FREE;
+                sum_x += dx;
+                sum_y += dy;
+                ++inside;
+            }
+        }
+        CHECK(t.held_count == held);
+        for (i = 0; i < held; ++i) {
+            CHECK(t.map[t.held[i] / 6] == t.held[i] % 6 + LEEKRL_CELL_OBSTACLE);
+            for (x = 0; x < i; ++x) CHECK(t.held[x] / 6 != t.held[i] / 6);
+        }
+        CHECK(sum_x % inside == 0 && sum_y % inside == 0);
+        CHECK(t.place == (sum_y / inside + 17) * 35 + sum_x / inside + 17);
+    }
+}
+
 static void test_random_fights(int fights)
 {
     session *s = malloc(sizeof(*s));
@@ -355,6 +423,7 @@ static void test_random_fights(int fights)
                 observe(s, actor, o);
                 if (next_random(&rng) % 10 == 0) {
                     check_observation(s, actor, o);
+                    check_turned(s, actor, o);
                     observe(s, actor, again);
                     CHECK(!memcmp(o, again, sizeof(*o)));
                     CHECK(s->state.rng_n == rng_before);
@@ -618,8 +687,7 @@ static void test_uses(void)
 }
 
 #define REFUSED(session_, actor, text) do { \
-        CHECK(!leekrl_observe(observer, &(session_)->fight, (actor), o->f, o->map, \
-                              error, sizeof(error))); \
+        CHECK(!try_observe(&(session_)->fight, (actor), 0, NULL, o)); \
         CHECK(strstr(error, text)); \
     } while (0)
 
@@ -659,8 +727,10 @@ static void test_refusals(void)
     REFUSED(s, leek(s, 0), "living entity not in the turn order");
     s->state.order.n_leeks = 2;
     observe(s, leek(s, 0), o);
-    CHECK(!leekrl_observe(observer, &s->fight, &extra[0], o->f, o->map, error, sizeof(error)));
-    CHECK(!leekrl_observe(observer, &s->fight, NULL, o->f, o->map, error, sizeof(error)));
+    CHECK(!try_observe(&s->fight, &extra[0], 0, NULL, o));
+    CHECK(!try_observe(&s->fight, NULL, 0, NULL, o));
+    CHECK(!try_observe(&s->fight, leek(s, 0), 8, NULL, o));
+    CHECK(!try_observe(&s->fight, leek(s, 0), -1, NULL, o));
     lw_stats_set_stat(&leek(s, 0)->m_base_stats, LW_STAT_STRENGTH, 5);
     leek(s, 0)->life = 0;
     REFUSED(s, leek(s, 0), "cannot observe");
@@ -726,7 +796,7 @@ static void speed(void)
     CHECK(o);
     start = clock();
     for (i = 0; i < n; ++i)
-        CHECK(leekrl_observe(observer, &s->fight, leek(s, 0), o->f, o->map, error, sizeof(error)));
+        CHECK(try_observe(&s->fight, leek(s, 0), i & 7, NULL, o));
     printf("%.2f us per observation (2 entities)\n",
            1e6 * (double)(clock() - start) / CLOCKS_PER_SEC / n);
     free(o);

@@ -277,4 +277,43 @@ Date: 2026-11-24. Status: accepted.
 A network trained only as team 0 won 256 fights out of 256 as team 0, and drew 97% as team
 1. The likely reason, not tested on its own, is that the same situation facing the other
 way looks different. Self-play shows both sides; opponents that do not learn alternate.
-Mirroring the observation is an idea for later.
+The world has since been turned to face the enemy, which probably makes this pointless: it
+has not been checked.
+
+## The world is turned to face the enemy
+
+Date: 2026-11-25. Status: accepted. `--no-face-enemy` goes without.
+
+Each output stands for a move or a cast at a relative cell. "Walk towards the enemy" was
+therefore a different set of outputs for each direction, learned separately: agents stopped
+about 20 cells away from the enemy, as untrained ones do, and half of the fights were draws.
+
+The world is now turned, by one of the 8 symmetries of the grid, so that the enemy leek is
+always in the same eighth of the directions. No reward and no rule changes, and no action is
+lost: the same game is seen turned (checked decision by decision, on the same fights). Only
+the points of the compass disappear, which mean nothing in the rules.
+
+1,000 updates each, same settings but for this and, for two of them, the next section, then
+1,000 to 2,000 fights: wins against an enemy that only ends its turns, 28% without, 75 to 76%
+with, for three seeds. Against the network trained without, 56 to 59% wins and 8 to 9%
+losses. Fights became shorter by themselves: 20% of draws instead of 49%, 340 decisions per
+fight instead of 880.
+
+What it assumes: nothing in the engine prefers a direction. Details might, such as the path
+chosen among equally short ones.
+
+## No move right after a move
+
+Date: 2026-11-25. Status: accepted. `--repeat-moves` goes without.
+
+A fifth of all decisions were moves of an entity that had just moved. A single move always
+reaches the same cell for as few MP: checked on 6.2 million pairs of moves, 63% of which
+wasted MP. So an entity that has just moved must cast before moving again.
+
+A leek then takes 3.8 decisions per turn instead of 4.5. But agents summon and cast more: a
+fight still takes 300 to 350 decisions, and they are neither better nor worse (41% of wins
+against 40 to 43% of losses, against a network trained without this rule).
+
+It can move again after a move whose path could have entered the zone of a plant that it has
+not awakened yet: the path then matters. Also after a move made with more than 20 MP, the
+longest move.

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -15,8 +17,8 @@ except ImportError:
 
 if torch is not None:
     from leekrl import VecEnv, action_table
-    from leekrl.model import Distribution, Legal, Policy, map_index
-    from leekrl.ppo import Rollout, advantages, unpack
+    from leekrl.model import Distribution, Inputs, Legal, Policy, gather, map_index
+    from leekrl.ppo import Rollout, advantages
     from leekrl.train import (Config, evaluate, inputs, load_policy, parse, random_actions,
                               train)
 
@@ -26,6 +28,18 @@ def small(**changes):
                     hidden=16, minibatch=64, epochs=2, eval_every=0, save_every=0,
                     deterministic=True, device="cpu")
     return Config(**{**settings, **changes})
+
+
+def listed(mask):
+    """Legal actions from booleans."""
+    return Legal(mask.nonzero(as_tuple=True)[1], mask.sum(1))
+
+
+def changed(seen, **changes):
+    """The same inputs, but for some of them."""
+    kept = dict(floats=seen.floats, place=seen.place, held=seen.held,
+                held_sizes=seen.held_sizes, legal=seen.legal)
+    return Inputs(**{**kept, **changes})
 
 
 def reference_advantages(fights, gamma, lam):
@@ -109,7 +123,8 @@ class LearnerTests(unittest.TestCase):
         mask[7] = False
         mask[7, 3] = True                       # a single choice
         logits = torch.randn(50, 200, generator=random) * 5
-        legal = Legal(mask)
+        legal = listed(mask)
+        self.assertEqual(legal.rows.tolist(), mask.nonzero(as_tuple=True)[0].tolist())
         distribution = Distribution(logits[legal.rows, legal.actions], legal)
         dense = torch.log_softmax(logits.masked_fill(~mask, -torch.inf), 1)
         torch.testing.assert_close(distribution.log_probs, dense[mask])
@@ -118,9 +133,6 @@ class LearnerTests(unittest.TestCase):
         self.assertEqual(distribution.entropy()[7], 0)
         best = legal.actions[distribution.best()]
         torch.testing.assert_close(best, dense.argmax(1))
-        torch.testing.assert_close(legal.actions[distribution.find(best)], best)
-        with self.assertRaises(ValueError):
-            distribution.find((~mask).int().argmax(1))
         counts = torch.zeros(50, 200)
         draws = 4000
         for _ in range(draws):
@@ -131,9 +143,21 @@ class LearnerTests(unittest.TestCase):
         self.assertEqual(counts[7, 3], draws)
         self.assertLess((counts / draws - dense.exp()).abs().max(), 0.04)
 
+    def test_gather(self):
+        """Lists of some rows, taken from the lists of all of them."""
+        random = np.random.default_rng(1)
+        sizes = torch.from_numpy(random.integers(0, 6, 40))
+        values = torch.arange(int(sizes.sum()))
+        offsets = sizes.cumsum(0) - sizes
+        picked = torch.from_numpy(random.permutation(40)[:15])
+        found, rows = gather(values, offsets, sizes, picked, sizes[picked])
+        expected = [values[offsets[p]:offsets[p] + sizes[p]] for p in picked]
+        self.assertTrue(torch.equal(found, torch.cat(expected)))
+        self.assertEqual(rows.tolist(), [i for i, e in enumerate(expected) for _ in e])
+
     def test_extreme_logits(self):
         mask = torch.ones(2, 4, dtype=torch.bool)
-        legal = Legal(mask)
+        legal = listed(mask)
         logits = torch.tensor([1e4, -1e4, -1e4, -1e4, -1e4, -1e4, -1e4, 1e4])
         distribution = Distribution(logits, legal)
         self.assertTrue(torch.isfinite(distribution.entropy()).all())
@@ -144,26 +168,27 @@ class LearnerTests(unittest.TestCase):
     def test_network_sees_each_input(self):
         with VecEnv(8, threads=2, seed=3) as env:
             env.reset()
-            cells, floats, mask = inputs(env, "cpu")
+            seen = inputs(env, "cpu")
             for mask_input, head in ((True, "flat"), (False, "flat"), (True, "pair"),
                                      (False, "pair")):
                 model = Policy(env.actions, env.float_count, 16, 16, mask_input, head)
-                _, value = model(cells, floats, mask)
+                _, value = model(seen)
                 self.assertEqual(value.shape, (8,))
-                changed = cells.clone()
-                changed[:, 1190 + 1] = 2 + (changed[:, 1190 + 1] == 2).byte()
-                self.assertFalse(torch.equal(model(changed, floats, mask)[1], value))
-                other = floats.clone()
-                other[:, -100:] += 1
-                self.assertFalse(torch.equal(model(cells, other, mask)[1], value))
-                fewer = mask.clone()
-                fewer[:, 1:] = False
-                same = torch.equal(model(cells, floats, fewer)[1], value)
+                held = seen.held.clone()
+                held[seen.held_offsets] ^= 1                # another category
+                self.assertFalse(torch.equal(model(changed(seen, held=held))[1], value))
+                place = (seen.place + 1) % 1225
+                self.assertFalse(torch.equal(model(changed(seen, place=place))[1], value))
+                floats = seen.floats.clone()
+                floats[:, -100:] += 1
+                self.assertFalse(torch.equal(model(changed(seen, floats=floats))[1], value))
+                fewer = Legal(torch.zeros(8, dtype=torch.long), torch.ones(8))
+                same = torch.equal(model(changed(seen, legal=fewer))[1], value)
                 self.assertEqual(same, not mask_input)
             # The whole batch at once or row by row: same results.
-            distribution, value = model(cells, floats, mask)
+            distribution, value = model(seen)
             for i in range(8):
-                alone, single = model(cells[i:i + 1], floats[i:i + 1], mask[i:i + 1])
+                alone, single = model(inputs(env, "cpu", np.array([i])))
                 torch.testing.assert_close(single[0], value[i])
                 rows = distribution.legal.rows == i
                 torch.testing.assert_close(alone.log_probs, distribution.log_probs[rows])
@@ -172,14 +197,11 @@ class LearnerTests(unittest.TestCase):
         """The position gives back exactly which cells are outside the map."""
         outside, found = {}, set()
         random = np.random.default_rng(5)
-        with VecEnv(64, threads=4, seed=9) as env:
-            model = Policy(env.actions, env.float_count, 16, 16)
+        with VecEnv(64, threads=4, seed=9, face_enemy=False, dense_map=True) as env:
             env.reset()
             for _ in range(60):
-                cells = torch.from_numpy(env.map.copy())
-                places = model.place(cells)
-                self.assertTrue(((places >= 0) & (places < 35 * 35)).all())
-                for place, row in zip(places.tolist(), (env.map == 0)):
+                self.assertTrue(((env.place >= 0) & (env.place < 35 * 35)).all())
+                for place, row in zip(env.place.tolist(), (env.map == 0)):
                     shape = row.tobytes()
                     self.assertEqual(outside.setdefault(place, shape), shape)
                     found.add(place)
@@ -188,17 +210,25 @@ class LearnerTests(unittest.TestCase):
         self.assertGreater(len(found), 300)
         self.assertEqual(len(set(outside.values())), len(outside))
 
+    def test_cells(self):
+        """The dense map, from the list."""
+        with VecEnv(16, threads=2, seed=3, dense_map=True) as env:
+            env.reset()
+            cells = inputs(env, "cpu").cells().numpy()
+            inside = env.map > 0
+            np.testing.assert_array_equal(cells[inside], env.map[inside])
+
     def test_pair_head(self):
         """Scores agree with the formula, written action by action."""
         with VecEnv(4, threads=2, seed=3) as env:
             env.reset()
-            cells, floats, mask = inputs(env, "cpu")
+            seen = inputs(env, "cpu")
+            floats, cells = seen.floats, seen.cells()
             model = Policy(env.actions, env.float_count, 16, 16, head="pair")
             head = model.policy
-            distribution, _ = model(cells, floats, mask)
-            legal = distribution.legal
-            hidden = model._trunk(cells, floats, legal)
-            scores = head(hidden, cells, floats, legal)
+            legal = seen.legal
+            hidden = model._trunk(seen)
+            scores = head(hidden, seen)
         table = action_table()
         blocks = floats[:, 3:3 + 18 * 116].reshape(4, 18, 116)
         seen = set()
@@ -244,17 +274,27 @@ class LearnerTests(unittest.TestCase):
             rollout = Rollout(env, 8)
             collect(env, model, rollout, config, torch.Generator().manual_seed(1), Fights())
             self.assertTrue(rollout.valid.any())
+            # The lists of the rollout, decision by decision.
+            for _ in rollout.minibatches(1000, torch.Generator().manual_seed(1)):
+                pass
             for t in range(8):
-                mask = unpack(rollout.mask[t], env.actions)
-                self.assertTrue(mask[torch.arange(16), rollout.actions[t]].all())
-                distribution, value = model(rollout.map[t], rollout.floats[t], mask)
-                position = distribution.find(rollout.actions[t])
+                seen, _ = rollout.pick(torch.arange(t * 16, (t + 1) * 16))
+                self.assertTrue(torch.equal(seen.legal.actions, rollout.lists["legal"][t].long()))
+                self.assertTrue(torch.equal(seen.held, rollout.lists["held"][t].long()))
+                distribution, value = model(seen)
+                position = seen.legal.offsets + rollout.choices[t]
                 np.testing.assert_allclose(distribution.log_probs[position].detach(),
                                            rollout.log_probs[t], atol=1e-5)
                 np.testing.assert_allclose(value.detach(), rollout.values[t], atol=1e-5)
-            seen = sum(len(batch["actions"]) for batch in rollout.minibatches(
-                50, torch.Generator().manual_seed(2)))
-            self.assertEqual(seen, rollout.valid.sum())
+            # Minibatches hold each decision once, with its own data.
+            seen = []
+            for batch, rest in rollout.minibatches(50, torch.Generator().manual_seed(2)):
+                distribution, _ = model(batch)
+                position = batch.legal.offsets + rest["choices"]
+                np.testing.assert_allclose(distribution.log_probs[position].detach(),
+                                           rest["log_probs"], atol=1e-5)
+                seen += rest["advantages"].tolist()
+            self.assertEqual(sorted(seen), sorted(rollout.advantages[rollout.valid].tolist()))
 
     def test_deterministic_training(self):
         """Two runs with the same configuration give the same metrics and weights."""
@@ -286,8 +326,9 @@ class LearnerTests(unittest.TestCase):
             self.assertFalse(rollout.valid[other].any())
             self.assertTrue(rollout.valid[~other & (rollout.team == 0)].any())
             self.assertTrue(rollout.valid[~other & (rollout.team == 1)].any())
-            if opponent == "idle":
-                self.assertFalse(rollout.actions.numpy()[other].any())
+            self.assertEqual(int(rollout.valid.sum()), sum(
+                len(rest["choices"]) for _, rest in rollout.minibatches(
+                    50, torch.Generator().manual_seed(1))))
 
     @unittest.skipUnless(torch is not None and torch.cuda.is_available(), "no GPU")
     def test_gpu(self):
@@ -297,13 +338,13 @@ class LearnerTests(unittest.TestCase):
             for head in ("flat", "pair"):
                 model = Policy(env.actions, env.float_count, 16, 16, head=head)
                 with torch.no_grad():
-                    a, u = model(*inputs(env, "cpu"))
-                    b, v = model.cuda()(*inputs(env, "cuda"))
+                    a, u = model(inputs(env, "cpu"))
+                    b, v = model.cuda()(inputs(env, "cuda"))
                 self.assertTrue(torch.equal(a.legal.actions, b.legal.actions.cpu()))
                 torch.testing.assert_close(a.log_probs, b.log_probs.cpu(), atol=1e-4, rtol=1e-4)
                 torch.testing.assert_close(u, v.cpu(), atol=1e-4, rtol=1e-4)
                 x, y = (d.sample(torch.Generator().manual_seed(1)) for d in (a, b))
-                self.assertTrue(torch.equal(x, y.cpu()))
+                self.assertTrue(torch.equal(x, y))
 
         def run():
             with tempfile.TemporaryDirectory() as folder:
@@ -395,21 +436,26 @@ class LearnerTests(unittest.TestCase):
         self.assertEqual(report["fights/actions_per_turn"], 4)
 
     def test_random_actions(self):
-        """Uniform over the legal actions, read from packed bits."""
+        """Uniform over the legal actions."""
+        from types import SimpleNamespace
         random = np.random.default_rng(2)
         legal = random.random((6, 10566)) < 0.002
         legal[:, [0, 10565]] = True
         legal[3] = False
         legal[3, 10565] = True
-        mask = np.packbits(legal, axis=1, bitorder="little")
+        env = SimpleNamespace(legal_actions=np.concatenate([np.flatnonzero(r) for r in legal]),
+                              legal_counts=legal.sum(1).astype(np.int32))
+        rows = np.array([5, 0, 3, 2])
         generator = torch.Generator().manual_seed(1)
         counts = np.zeros(legal.shape)
         draws = 4000
         for _ in range(draws):
-            counts[np.arange(6), random_actions(mask, generator)] += 1
+            counts[rows, random_actions(env, rows, generator)] += 1
         self.assertEqual(counts[~legal].sum(), 0)
-        expected = legal * draws / legal.sum(1, keepdims=True)
-        self.assertLess((np.abs(counts - expected) / np.sqrt(np.maximum(expected, 1))).max(), 5)
+        self.assertFalse(counts[[1, 4]].any())
+        expected = (legal * draws / legal.sum(1, keepdims=True))[rows]
+        error = np.abs(counts[rows] - expected) / np.sqrt(np.maximum(expected, 1))
+        self.assertLess(error.max(), 5)
 
     def test_peek(self):
         from leekrl import peek
@@ -426,6 +472,12 @@ class LearnerTests(unittest.TestCase):
             model = Policy(env.actions, env.float_count, 16, 16)
         fights = peek.record(model, 2, seed=4)
         self.assertEqual(json.dumps(fights), json.dumps(peek.record(model, 2, seed=4)))
+        # The same world is shown, whether the network sees it turned or not.
+        plain = peek.record(model, 1, seed=4, face_enemy=False)[0]["decisions"][0]
+        turned = fights[0]["decisions"][0]
+        self.assertTrue(turned["symmetry"] and not plain["symmetry"])
+        self.assertEqual((turned["map"], turned["seen"], sorted(turned["actions"])),
+                         (plain["map"], plain["seen"], sorted(plain["actions"])))
         for fight in fights:
             self.assertIsNotNone(fight["end"])
             for d in fight["decisions"]:
@@ -457,8 +509,34 @@ class LearnerTests(unittest.TestCase):
         self.assertEqual((config.envs, config.mask_input, config.gamma, config.deterministic),
                          (4, False, 0.5, True))
         self.assertEqual((config.trim, parse(["--trim", "useless"]).trim), ("harmful", "useless"))
-        with self.assertRaises(SystemExit):
-            parse(["--trim", "all"])
+        self.assertEqual((config.face_enemy, config.repeat_moves), (True, False))
+        config = parse(["--no-face-enemy", "--repeat-moves", "--eval-opponents", "idle,random"])
+        self.assertEqual((config.face_enemy, config.repeat_moves), (False, True))
+        for wrong in (["--trim", "all"], ["--eval-opponents", "idle,me"], ["--layers", "0"]):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                parse(wrong)
+
+    def test_evaluations_in_training(self):
+        for opponents, expected in (("idle", {"idle"}), ("idle,random", {"idle", "random"}),
+                                    ("", set())):
+            with tempfile.TemporaryDirectory() as folder:
+                _, history = train(small(updates=1, eval_every=1, eval_fights=4,
+                                         eval_opponents=opponents), folder)
+            found = {name.split("/")[1].split("_")[0] for name in history[0]
+                     if name.startswith("eval/")}
+            self.assertEqual(found, expected)
+
+    def test_older_runs(self):
+        """What the settings of older runs do not say."""
+        from leekrl.train import world
+        self.assertEqual(world({"skew": 3.0}), {
+            "known_probability": 0.01, "skew": 3.0, "trim": "useless", "face_enemy": False,
+            "repeat_moves": True})
+        with tempfile.TemporaryDirectory() as folder:
+            train(small(updates=1, save_every=1), folder)
+            with self.assertRaisesRegex(ValueError, "turned otherwise"):
+                train(small(updates=2, face_enemy=False,
+                            resume=str(Path(folder) / "checkpoint_000001.pt")), folder)
 
 
 if __name__ == "__main__":

@@ -2,8 +2,8 @@
 
 import ctypes
 import os
-from ctypes import (POINTER, Structure, c_char_p, c_double, c_float, c_int, c_int32,
-                    c_size_t, c_uint8, c_uint64, c_void_p)
+from ctypes import (POINTER, Structure, c_char_p, c_double, c_float, c_int, c_int16,
+                    c_int32, c_size_t, c_uint8, c_uint64, c_void_p)
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,22 +32,24 @@ class RewardOptions(Structure):
 class VecOptions(Structure):
     _fields_ = [("envs", c_int), ("threads", c_int), ("seed", c_uint64),
                 ("known_probability", c_double), ("skip_forced", c_int),
-                ("trim", c_int),
+                ("trim", c_int), ("face_enemy", c_int), ("repeat_moves", c_int),
                 ("builds", BuildOptions), ("rewards", RewardOptions)]
 
 
 class VecBuffers(Structure):
-    _fields_ = [("floats", POINTER(c_float)), ("map", POINTER(c_uint8)),
-                ("mask", POINTER(c_uint8)), ("rewards", POINTER(c_float)),
-                ("team", POINTER(c_uint8)), ("first", POINTER(c_uint8)),
-                ("done", POINTER(c_uint8)), ("end_rewards", POINTER(c_float)),
-                ("episode", POINTER(c_float))]
+    _fields_ = [("floats", POINTER(c_float)), ("legal", POINTER(c_int16)),
+                ("legal_counts", POINTER(c_int32)), ("held", POINTER(c_int16)),
+                ("held_counts", POINTER(c_int32)), ("place", POINTER(c_int16)),
+                ("symmetry", POINTER(c_uint8)), ("map", POINTER(c_uint8)),
+                ("rewards", POINTER(c_float)), ("team", POINTER(c_uint8)),
+                ("first", POINTER(c_uint8)), ("done", POINTER(c_uint8)),
+                ("end_rewards", POINTER(c_float)), ("episode", POINTER(c_float))]
 
 
 class Layout(Structure):
     """Sizes known by C, compared with what Python assumes."""
     _fields_ = [(name, c_int) for name in (
-        "map_cells", "reward_parts", "episode_size", "stats", "options_size", "buffers_size",
+        "map_cells", "max_held", "reward_parts", "episode_size", "stats", "options_size", "buffers_size",
         "build_size")]
 
 
@@ -71,7 +73,7 @@ def _declare(library):
         "leekrl_item_snapshot_register": (c_int, [c_char_p, c_size_t]),
         "leekrl_item_snapshot_hash": (c_char_p, []),
         "leekrl_vec_options_init": (None, [POINTER(VecOptions)]),
-        "leekrl_vec_sizes": (c_int, [size, size, size]),
+        "leekrl_vec_sizes": (c_int, [size, size]),
         "leekrl_vec_create": (c_void_p, [POINTER(VecOptions), POINTER(VecBuffers), c_char_p,
                                          c_size_t]),
         "leekrl_vec_destroy": (None, [c_void_p]),

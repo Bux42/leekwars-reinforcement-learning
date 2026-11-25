@@ -15,18 +15,21 @@ except ImportError:
 
 if np is not None:
     from leekrl import EPISODE_FIELDS, TRIMS, WAIT, VecEnv, load_known_builds
+    from leekrl.vec import take
 
 
 def play(steps, seed=1, **options):
     """Play random legal actions. Returns what was seen at each step."""
     random = np.random.default_rng(0)
     seen = []
-    with VecEnv(16, seed=seed, **options) as env:
+    with VecEnv(16, seed=seed, dense_map=True, **options) as env:
         env.reset()
         for _ in range(steps):
             legal = env.legal()
             actions = np.array([random.choice(np.flatnonzero(row)) for row in legal])
-            seen.append((env.floats.copy(), env.map.copy(), env.mask.copy(),
+            seen.append((env.floats.copy(), env.map.copy(), env.legal_actions.copy(),
+                         env.legal_counts.copy(), env.held.copy(), env.held_counts.copy(),
+                         env.place.copy(), env.symmetry.copy(),
                          env.rewards.copy(), env.team.copy(), env.done.copy(),
                          env.episode.copy()))
             env.step(actions)
@@ -37,10 +40,24 @@ def play(steps, seed=1, **options):
 class PythonTests(unittest.TestCase):
     def test_shapes_and_values(self):
         with VecEnv(4, threads=2) as env:
+            self.assertIsNone(env.map)
+        with VecEnv(4, threads=2, dense_map=True) as env:
             env.reset()
-            self.assertEqual((env.actions, env.float_count, env.mask_bytes),
-                             (10566, 2705, 1321))
+            self.assertEqual((env.actions, env.float_count), (10566, 2705))
             self.assertEqual(env.map.shape, (4, 2381))
+            self.assertEqual(len(env.legal_actions), env.legal_counts.sum())
+            # Both forms of the map agree.
+            at = 0
+            for i, n in enumerate(env.held_counts):
+                held = env.held[at:at + n]
+                at += n
+                np.testing.assert_array_equal(np.sort(held // 6), np.flatnonzero(env.map[i] > 1))
+                np.testing.assert_array_equal(env.map[i][held // 6], held % 6 + 2)
+            rows = np.array([3, 0])
+            legal, counts = take(env.legal_actions, env.legal_counts, rows)
+            expected = [np.flatnonzero(env.legal()[r]) for r in rows]
+            np.testing.assert_array_equal(legal, np.concatenate(expected))
+            self.assertEqual(counts.tolist(), [len(e) for e in expected])
             self.assertTrue((env.map[:, 1190] == 3).all())
             self.assertTrue(env.legal()[:, 0].all())
             self.assertTrue(env.first.all() and not env.done.any())
@@ -110,15 +127,47 @@ class PythonTests(unittest.TestCase):
         with VecEnv(16, seed=8, skip_forced=False) as default:
             default.reset()
             envs[-1].reset()
-            np.testing.assert_array_equal(default.mask, envs[-1].mask)
+            np.testing.assert_array_equal(default.legal(), envs[-1].legal())
         for env in envs:
             env.close()
         with self.assertRaisesRegex(ValueError, "trim must be one of"):
             VecEnv(1, trim="all")
 
+    def test_facing(self):
+        """Seen from Python: the same fights, turned."""
+        from leekrl.symmetry import facing, turn, turn_back, turned_actions, turned_cells
+        random = np.random.default_rng(4)
+        x, y = random.integers(-30, 31, (2, 500))
+        for s in range(8):
+            back = turn_back(s, *turn(s, x, y))
+            self.assertTrue((back[0] == x).all() and (back[1] == y).all())
+        u, v = turn(facing(x, y), x, y)
+        self.assertTrue(((0 <= v) & (v <= u)).all())
+        actions, cells = turned_actions(), turned_cells()
+        for table in (actions, cells):
+            for row in table:
+                self.assertEqual(len(set(row.tolist())), table.shape[1])
+        options = dict(seed=6, known_builds=load_known_builds(), dense_map=True)
+        rows = np.arange(32)
+        with VecEnv(32, face_enemy=False, **options) as plain, VecEnv(32, **options) as env:
+            plain.reset()
+            env.reset()
+            for _ in range(250):
+                s = env.symmetry
+                self.assertFalse(plain.symmetry.any())
+                np.testing.assert_array_equal(env.map[rows[:, None], cells[s]], plain.map)
+                legal = plain.legal()
+                np.testing.assert_array_equal(env.legal()[rows[:, None], actions[s]], legal)
+                chosen = np.array([random.choice(np.flatnonzero(row)) for row in legal])
+                plain.step(chosen)
+                env.step(actions[s, chosen])
+                for name in ("rewards", "team", "first", "done", "end_rewards", "episode"):
+                    np.testing.assert_array_equal(getattr(env, name), getattr(plain, name))
+
     def test_waiting(self):
         """An environment that waits only clears done, and others are not affected."""
-        names = ("floats", "map", "mask", "rewards", "team", "first", "end_rewards", "episode")
+        names = ("floats", "legal_counts", "held_counts", "place", "symmetry", "rewards",
+                 "team", "first", "end_rewards", "episode")
         random = np.random.default_rng(1)
         with VecEnv(2, threads=2, seed=4) as env, VecEnv(2, threads=2, seed=4) as other:
             env.reset()

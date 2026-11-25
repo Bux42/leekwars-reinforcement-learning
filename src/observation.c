@@ -1,5 +1,7 @@
 #include "leekrl/observation.h"
 
+#include "leekrl/symmetry.h"
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,7 +79,8 @@ struct leekrl_observer {
     size_t chips;
     size_t limited;
     size_t floats;
-    short map_index[SIDE][SIDE]; /* [dy][dx], -1 outside the radius */
+    /* Of the turned cell, [symmetry][dy][dx]. -1 outside the radius. */
+    short map_index[LEEKRL_SYMMETRIES][SIDE][SIDE];
 };
 
 /* ---- Layout ---------------------------------------------------------- */
@@ -142,7 +145,7 @@ leekrl_observer *leekrl_observer_create(const leekrl_action_catalog *catalog)
     const leekrl_action *actions;
     leekrl_observer *observer;
     size_t i, n;
-    int max_id = 0, dx, dy;
+    int max_id = 0, dx, dy, symmetry;
     if (!catalog) return NULL;
     actions = leekrl_action_catalog_actions(catalog);
     n = leekrl_action_catalog_count(catalog);
@@ -190,10 +193,15 @@ leekrl_observer *leekrl_observer_create(const leekrl_action_catalog *catalog)
     }
     observer->floats = LEEKRL_OBS_ITEMS +
                        2 * (2 * observer->weapons + 2 * observer->chips) + observer->limited;
-    for (dy = -LEEKRL_OBS_MAP_RADIUS; dy <= LEEKRL_OBS_MAP_RADIUS; ++dy)
-        for (dx = -LEEKRL_OBS_MAP_RADIUS; dx <= LEEKRL_OBS_MAP_RADIUS; ++dx)
-            observer->map_index[dy + LEEKRL_OBS_MAP_RADIUS][dx + LEEKRL_OBS_MAP_RADIUS] =
-                (short)leekrl_obs_map_index(dx, dy);
+    for (symmetry = 0; symmetry < LEEKRL_SYMMETRIES; ++symmetry)
+        for (dy = -LEEKRL_OBS_MAP_RADIUS; dy <= LEEKRL_OBS_MAP_RADIUS; ++dy)
+            for (dx = -LEEKRL_OBS_MAP_RADIUS; dx <= LEEKRL_OBS_MAP_RADIUS; ++dx) {
+                int x = dx, y = dy;
+                leekrl_turn(symmetry, &x, &y);
+                observer->map_index[symmetry][dy + LEEKRL_OBS_MAP_RADIUS]
+                                             [dx + LEEKRL_OBS_MAP_RADIUS] =
+                    (short)leekrl_obs_map_index(x, y);
+            }
     return observer;
 }
 
@@ -254,11 +262,11 @@ static int write_effects(LwEntity *entity, float *out, char *error, size_t error
     return 1;
 }
 
-static int write_entity(LwState *state, LwEntity *actor, LwEntity *entity, float *out,
-                        char *error, size_t error_size)
+static int write_entity(LwState *state, LwEntity *actor, LwEntity *entity, int symmetry,
+                        float *out, char *error, size_t error_size)
 {
     LwCell *from = lw_entity_get_cell(actor), *cell = lw_entity_get_cell(entity);
-    int summon = lw_entity_is_summon(entity), type = 0, i;
+    int summon = lw_entity_is_summon(entity), type = 0, dx, dy, i;
     int total_life = lw_entity_get_total_life(entity);
     int zone = entity->awakening_zone;
     if (!cell) return fail(error, error_size, "entity without a cell", entity->fight_id);
@@ -279,10 +287,11 @@ static int write_entity(LwState *state, LwEntity *actor, LwEntity *entity, float
     out[LEEKRL_OBS_LIFE] = total_life > 0
         ? (float)lw_entity_get_life(entity) / (float)total_life : 0;
     out[LEEKRL_OBS_TOTAL_LIFE] = (float)(log(1.0 + (total_life > 0 ? total_life : 0)) / 10);
-    out[LEEKRL_OBS_DX] = (float)(lw_cell_get_x(cell) - lw_cell_get_x(from)) /
-                         LEEKRL_OBS_MAP_RADIUS;
-    out[LEEKRL_OBS_DY] = (float)(lw_cell_get_y(cell) - lw_cell_get_y(from)) /
-                         LEEKRL_OBS_MAP_RADIUS;
+    dx = lw_cell_get_x(cell) - lw_cell_get_x(from);
+    dy = lw_cell_get_y(cell) - lw_cell_get_y(from);
+    leekrl_turn(symmetry, &dx, &dy);
+    out[LEEKRL_OBS_DX] = (float)dx / LEEKRL_OBS_MAP_RADIUS;
+    out[LEEKRL_OBS_DY] = (float)dy / LEEKRL_OBS_MAP_RADIUS;
     out[LEEKRL_OBS_DISTANCE] = (float)lw_pathfinding_get_case_distance(from, cell) /
                                LEEKRL_OBS_MAP_RADIUS;
     out[LEEKRL_OBS_TOTAL_TP] = (float)lw_entity_get_total_tp(entity) / 30;
@@ -358,18 +367,59 @@ static void write_uses(const leekrl_observer *observer, LwEntity *actor, float *
     }
 }
 
-static int write_map(const leekrl_observer *observer, const LwMap *map, const LwCell *from,
-                      uint8_t *out)
+int leekrl_obstacles_find(LwFight *fight, leekrl_obstacles *obstacles)
 {
+    LwState *state = fight ? lw_fight_get_state(fight) : NULL;
+    const LwMap *map = state ? lw_state_get_map(state) : NULL;
     int i;
-    memset(out, LEEKRL_CELL_OUTSIDE, LEEKRL_OBS_MAP_CELLS);
+    if (!map || !obstacles || map->nb_cells > LEEKRL_OBS_MAX_HELD) return 0;
+    obstacles->n = 0;
     for (i = 0; i < map->nb_cells; ++i) {
         const LwCell *cell = &map->cells[i];
-        int index = observer->map_index[cell->y - from->y + LEEKRL_OBS_MAP_RADIUS]
-                                       [cell->x - from->x + LEEKRL_OBS_MAP_RADIUS];
-        if (index < 0) return 0;
-        out[index] = lw_cell_is_walkable(cell) ? LEEKRL_CELL_FREE : LEEKRL_CELL_OBSTACLE;
+        if (lw_cell_is_walkable(cell)) continue;
+        obstacles->x[obstacles->n] = (int16_t)cell->x;
+        obstacles->y[obstacles->n++] = (int16_t)cell->y;
     }
+    return 1;
+}
+
+/* Index in the turned map, for an observer at from, or -1. */
+static int index_of(const leekrl_observer *observer, int symmetry, const LwCell *from,
+                    int x, int y)
+{
+    return observer->map_index[symmetry][y - from->y + LEEKRL_OBS_MAP_RADIUS]
+                                        [x - from->x + LEEKRL_OBS_MAP_RADIUS];
+}
+
+static int hold(leekrl_observation *out, int index, int category)
+{
+    if (index < 0 || out->held_count >= LEEKRL_OBS_MAX_HELD) return 0;
+    out->held[out->held_count++] = (int16_t)(index * 6 + category - LEEKRL_CELL_OBSTACLE);
+    if (out->map) out->map[index] = (uint8_t)category;
+    return 1;
+}
+
+/* Everything but the entities. */
+static int write_map(const leekrl_observer *observer, const LwMap *map, const LwCell *from,
+                     int symmetry, const leekrl_obstacles *obstacles, leekrl_observation *out)
+{
+    int dx = (map->min_x + map->max_x) / 2 - from->x, dy = (map->min_y + map->max_y) / 2 - from->y;
+    int i;
+    leekrl_turn(symmetry, &dx, &dy);
+    if (abs(dx) > LEEKRL_OBS_PLACES / 2 || abs(dy) > LEEKRL_OBS_PLACES / 2) return 0;
+    out->place = (dy + LEEKRL_OBS_PLACES / 2) * LEEKRL_OBS_PLACES + dx + LEEKRL_OBS_PLACES / 2;
+    out->held_count = 0;
+    if (out->map) {
+        memset(out->map, LEEKRL_CELL_OUTSIDE, LEEKRL_OBS_MAP_CELLS);
+        for (i = 0; i < map->nb_cells; ++i) {
+            int index = index_of(observer, symmetry, from, map->cells[i].x, map->cells[i].y);
+            if (index < 0) return 0;
+            out->map[index] = LEEKRL_CELL_FREE;
+        }
+    }
+    for (i = 0; i < obstacles->n; ++i)
+        if (!hold(out, index_of(observer, symmetry, from, obstacles->x[i], obstacles->y[i]),
+                  LEEKRL_CELL_OBSTACLE)) return 0;
     return 1;
 }
 
@@ -382,18 +432,34 @@ static uint8_t category(const LwEntity *actor, const LwEntity *entity)
     return summon ? LEEKRL_CELL_ENEMY_SUMMON : LEEKRL_CELL_ENEMY_LEEK;
 }
 
+/* Infinities and NaN have all their exponent bits set. Compilers vectorize this. */
+static int all_finite(const float *values, size_t n)
+{
+    uint32_t found = 0, bits;
+    size_t i;
+    for (i = 0; i < n; ++i) {
+        memcpy(&bits, &values[i], sizeof(bits));
+        found |= (bits & 0x7f800000u) == 0x7f800000u;
+    }
+    return !found;
+}
+
 int leekrl_observe(const leekrl_observer *observer, LwFight *fight, LwEntity *actor,
-                   float *floats, uint8_t *map, char *error, size_t error_size)
+                   int symmetry, const leekrl_obstacles *obstacles, leekrl_observation *out,
+                   char *error, size_t error_size)
 {
     LwState *state;
     LwMap *cells;
     LwCell *from;
     LwEntity *leeks[2] = {NULL, NULL};
+    leekrl_obstacles looked_for;
+    float *floats;
     int summons[2] = {0, 0}, position = -1, alive = 0, i, n;
     size_t block, k;
     if (error && error_size) error[0] = 0;
-    if (!observer || !fight || !actor || !floats || !map)
-        return fail(error, error_size, "missing argument", 0);
+    if (!observer || !fight || !actor || !out || !out->floats || !out->held || symmetry < 0 ||
+        symmetry >= LEEKRL_SYMMETRIES) return fail(error, error_size, "wrong argument", 0);
+    floats = out->floats;
     state = lw_fight_get_state(fight);
     cells = state ? lw_state_get_map(state) : NULL;
     from = lw_entity_get_cell(actor);
@@ -401,6 +467,11 @@ int leekrl_observe(const leekrl_observer *observer, LwFight *fight, LwEntity *ac
         return fail(error, error_size, "actor cannot observe", actor->fight_id);
     n = state->order.n_leeks;
     if (n > LEEKRL_OBS_MAX_ENTITIES) return fail(error, error_size, "too many entities", n);
+    if (!obstacles) {
+        if (!leekrl_obstacles_find(fight, &looked_for))
+            return fail(error, error_size, "map too large", cells->nb_cells);
+        obstacles = &looked_for;
+    }
     if (cells->max_x - cells->min_x > LEEKRL_OBS_MAP_RADIUS ||
         cells->max_y - cells->min_y > LEEKRL_OBS_MAP_RADIUS)
         return fail(error, error_size, "map too large", cells->nb_cells);
@@ -411,17 +482,17 @@ int leekrl_observe(const leekrl_observer *observer, LwFight *fight, LwEntity *ac
     if (alive != n) return fail(error, error_size, "living entity not in the turn order", alive - n);
 
     memset(floats, 0, observer->floats * sizeof(*floats));
-    if (!write_map(observer, cells, from, map))
+    if (!write_map(observer, cells, from, symmetry, obstacles, out))
         return fail(error, error_size, "map too large", cells->nb_cells);
     for (i = 0; i < n; ++i) {
         LwEntity *entity = state->order.leeks[(position + i) % n];
         LwCell *cell = lw_entity_get_cell(entity);
         int enemy = lw_entity_get_team(entity) != lw_entity_get_team(actor);
-        if (!write_entity(state, actor, entity, floats + LEEKRL_OBS_ENTITIES +
+        if (!write_entity(state, actor, entity, symmetry, floats + LEEKRL_OBS_ENTITIES +
                           i * LEEKRL_OBS_ENTITY_SIZE, error, error_size)) return 0;
-        map[observer->map_index[cell->y - from->y + LEEKRL_OBS_MAP_RADIUS]
-                               [cell->x - from->x + LEEKRL_OBS_MAP_RADIUS]] =
-            category(actor, entity);
+        if (!hold(out, index_of(observer, symmetry, from, cell->x, cell->y),
+                  category(actor, entity)))
+            return fail(error, error_size, "too many cells held", out->held_count);
         if (lw_entity_is_summon(entity)) {
             ++summons[enemy];
         } else {
@@ -439,7 +510,9 @@ int leekrl_observe(const leekrl_observer *observer, LwFight *fight, LwEntity *ac
                          error, error_size)) return 0;
     }
     write_uses(observer, actor, floats + LEEKRL_OBS_ITEMS + 2 * block);
-    for (k = 0; k < observer->floats; ++k)
-        if (!isfinite(floats[k])) return fail(error, error_size, "non-finite value at", (int)k);
+    if (!all_finite(floats, observer->floats)) {
+        for (k = 0; isfinite(floats[k]); ++k) {}
+        return fail(error, error_size, "non-finite value at", (int)k);
+    }
     return 1;
 }

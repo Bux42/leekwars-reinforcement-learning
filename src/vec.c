@@ -3,6 +3,7 @@
 #include "leekrl/actions.h"
 #include "leekrl/plant_ai.h"
 #include "leekrl/rules.h"
+#include "leekrl/symmetry.h"
 #include "leekrl/threads.h"
 
 #include <math.h>
@@ -16,11 +17,23 @@
 #include "lw_generator.h"
 #include "lw_map.h"
 #include "lw_outcome.h"
+#include "lw_pathfinding.h"
 #include "lw_scenario.h"
 #include "lw_state.h"
 
 #define MAX_REDRAWS 1000
 #define MAX_RESTARTS 1000
+#define MAX_ACTIONS 16384
+
+#if defined(_MSC_VER)
+#define THREAD_LOCAL __declspec(thread)
+#else
+#define THREAD_LOCAL __thread
+#endif
+
+/* Mask of the decision being prepared, one byte per action, not turned. One per thread and
+ * not per environment: it stays in the processor's cache. */
+static THREAD_LOCAL uint8_t thread_mask[MAX_ACTIONS];
 
 typedef struct {
     leekrl_vec *vec;
@@ -34,7 +47,13 @@ typedef struct {
     int scenario_ready;
     int started;
     leekrl_reward_tracker rewards;
-    uint8_t *legal;              /* mask, one byte per action */
+    leekrl_obstacles obstacles;
+    int16_t *list;               /* legal actions, turned */
+    int n_list;
+    int16_t held[LEEKRL_OBS_MAX_HELD];
+    int n_held;
+    int symmetry;
+    const LwEntity *moved;       /* entity that has just moved, and must not move again */
     int decisions[2];
     int known[2];
     int redrawn;
@@ -53,7 +72,9 @@ struct leekrl_vec {
     environment **envs;
     size_t actions;
     size_t floats;
-    size_t mask_bytes;
+    /* Index of each action once turned, and the other way round, by symmetry. */
+    int16_t *turned[LEEKRL_SYMMETRIES];
+    int16_t *original[LEEKRL_SYMMETRIES];
     leekrl_build *known;
     double *weights;
     double total_weight;
@@ -72,6 +93,7 @@ void leekrl_vec_options_init(leekrl_vec_options *options)
     options->known_probability = 0.01;
     options->skip_forced = 1;
     options->trim = LEEKRL_TRIM_HARMFUL;
+    options->face_enemy = 1;
     leekrl_build_options_init(&options->builds);
     leekrl_reward_options_init(&options->rewards);
 }
@@ -173,6 +195,9 @@ static int start_fight(environment *env)
         env->decisions[team] = 0;
         env->start_life[team] = lw_entity_get_total_life(leek_of(env, team));
     }
+    env->moved = NULL;
+    if (!leekrl_obstacles_find(&env->fight, &env->obstacles))
+        return fail(env, "map too large", NULL);
     leekrl_reward_start(&env->rewards, &env->vec->options.rewards, &env->fight);
     return 1;
 }
@@ -213,21 +238,83 @@ static int only_end_turn(const uint8_t *legal, size_t count)
     return !memchr(legal + 1, 1, count - 1);
 }
 
+/* Whether the path of a move can matter: it could enter the zone of a plant that the
+ * entity has not awakened yet. */
+static int path_matters(const LwState *state, LwEntity *actor, int mp)
+{
+    int i, k;
+    for (i = 0; i < state->order.n_leeks; ++i) {
+        const LwEntity *plant = state->order.leeks[i];
+        if (plant->awakening_zone <= 0 || !plant->cell ||
+            lw_pathfinding_get_case_distance(actor->cell, plant->cell) >
+                plant->awakening_zone + mp) continue;
+        for (k = 0; k < plant->n_awakened_by; ++k)
+            if (plant->awakened_by[k] == lw_entity_get_fid(actor)) break;
+        if (k == plant->n_awakened_by) return 1;
+    }
+    return 0;
+}
+
+/* Position of the lowest bit set. */
+static int lowest_bit(uint64_t bits)
+{
+#if defined(__GNUC__)
+    return __builtin_ctzll(bits);
+#else
+    int n = 0;
+    while (!((bits >> n) & 1)) ++n;
+    return n;
+#endif
+}
+
+/* The legal actions, turned and in order. */
+static void list_legal(environment *env, const uint8_t *legal)
+{
+    leekrl_vec *vec = env->vec;
+    const int16_t *turned = vec->turned[env->symmetry];
+    uint64_t set[(MAX_ACTIONS + 63) / 64];
+    size_t words = (vec->actions + 63) / 64, i, k;
+    memset(set, 0, words * sizeof(*set));
+    for (i = 0; i < vec->actions; i += 8) {
+        uint64_t eight = 0;
+        size_t end = vec->actions - i < 8 ? vec->actions : i + 8;
+        memcpy(&eight, legal + i, end - i);
+        for (k = i; eight && k < end; ++k)
+            if (legal[k]) set[turned[k] >> 6] |= UINT64_C(1) << (turned[k] & 63);
+    }
+    env->n_list = 0;
+    for (i = 0; i < words; ++i)
+        for (; set[i]; set[i] &= set[i] - 1)
+            env->list[env->n_list++] = (int16_t)(i * 64 + (size_t)lowest_bit(set[i]));
+}
+
 /* Write everything the learner needs for the decision of actor. */
-static int write_decision(environment *env, LwEntity *actor)
+static int write_decision(environment *env, LwEntity *actor, const uint8_t *legal)
 {
     leekrl_vec *vec = env->vec;
     const leekrl_vec_buffers *out = &vec->buffers;
-    size_t index = (size_t)env->index, i;
-    uint8_t *mask = out->mask + index * vec->mask_bytes;
+    size_t index = (size_t)env->index;
     float *parts = out->rewards + index * LEEKRL_REWARD_PARTS;
     int team = lw_entity_get_team(actor);
+    leekrl_observation observation = {0};
     char detail[128];
-    if (!leekrl_observe(vec->observer, &env->fight, actor, out->floats + index * vec->floats,
-                        out->map + index * LEEKRL_OBS_MAP_CELLS, detail, sizeof(detail)))
+    env->symmetry = 0;
+    if (vec->options.face_enemy) {
+        const LwEntity *enemy = leek_of(env, 1 - team);
+        if (!enemy || !enemy->cell || !actor->cell) return fail(env, "no enemy to face", NULL);
+        env->symmetry = leekrl_symmetry_facing(enemy->cell->x - actor->cell->x,
+                                               enemy->cell->y - actor->cell->y);
+    }
+    observation.floats = out->floats + index * vec->floats;
+    observation.map = out->map ? out->map + index * LEEKRL_OBS_MAP_CELLS : NULL;
+    observation.held = env->held;
+    if (!leekrl_observe(vec->observer, &env->fight, actor, env->symmetry, &env->obstacles,
+                        &observation, detail, sizeof(detail)))
         return fail(env, "cannot observe", detail);
-    memset(mask, 0, vec->mask_bytes);
-    for (i = 0; i < vec->actions; ++i) mask[i >> 3] |= (uint8_t)(env->legal[i] << (i & 7));
+    env->n_held = observation.held_count;
+    out->place[index] = (int16_t)observation.place;
+    out->symmetry[index] = (uint8_t)env->symmetry;
+    list_legal(env, legal);
     leekrl_reward_step(&env->rewards, &vec->options.rewards, &env->fight, team, parts);
     out->team[index] = (uint8_t)team;
     out->first[index] = env->decisions[team] == 0;
@@ -241,19 +328,23 @@ static int write_decision(environment *env, LwEntity *actor)
 static int advance(environment *env)
 {
     leekrl_vec *vec = env->vec;
+    uint8_t *legal = thread_mask;
     int restarts = 0;
     for (;;) {
         LwEntity *actor = lw_fight_step_current(&env->fight);
         if (actor) {
             if (!lw_entity_is_dead(actor) && !lw_state_is_finished(&env->state)) {
                 leekrl_action_status status = leekrl_action_catalog_trimmed_mask(
-                    vec->catalog, &env->fight, actor, vec->options.trim, env->legal);
+                    vec->catalog, &env->fight, actor, vec->options.trim, legal);
                 if (status != LEEKRL_ACTION_OK)
                     return fail(env, "cannot compute the mask",
                                 leekrl_action_status_string(status));
-                if (!vec->options.skip_forced || !only_end_turn(env->legal, vec->actions))
-                    return write_decision(env, actor);
+                if (env->moved == actor)
+                    memset(legal + 1, 0, LEEKRL_MOVE_ACTION_COUNT);
+                if (!vec->options.skip_forced || !only_end_turn(legal, vec->actions))
+                    return write_decision(env, actor, legal);
             }
+            env->moved = NULL;
             if (lw_fight_step_end_turn(&env->fight))
                 return fail(env, "cannot end the turn",
                             lw_state_get_fatal_error_message(&env->state));
@@ -283,6 +374,17 @@ static void reset_task(void *context, int index)
     if (start_fight(env)) advance(env);
 }
 
+static int is_legal(const environment *env, int32_t action)
+{
+    int low = 0, high = env->n_list;
+    while (low < high) {
+        int middle = low + (high - low) / 2;
+        if (env->list[middle] < action) low = middle + 1;
+        else high = middle;
+    }
+    return low < env->n_list && env->list[low] == action;
+}
+
 static void step_task(void *context, int index)
 {
     leekrl_vec *vec = context;
@@ -291,16 +393,22 @@ static void step_task(void *context, int index)
     const leekrl_action *action;
     LwEntity *actor = lw_fight_step_current(&env->fight);
     leekrl_action_status status;
-    int result;
+    int result, mp;
     vec->buffers.done[index] = 0;
     if (chosen == LEEKRL_VEC_WAIT) return;
-    if (!actor || chosen < 0 || (size_t)chosen >= vec->actions || !env->legal[chosen]) {
+    if (!actor || !is_legal(env, chosen)) {
         char detail[32];
         snprintf(detail, sizeof(detail), "%d", (int)chosen);
         fail(env, "illegal action", detail);
         return;
     }
-    action = leekrl_action_catalog_actions(vec->catalog) + chosen;
+    action = leekrl_action_catalog_actions(vec->catalog) + vec->original[env->symmetry][chosen];
+    env->moved = NULL;
+    if (action->kind == LEEKRL_ACTION_MOVE && !vec->options.repeat_moves) {
+        mp = lw_entity_get_mp(actor);
+        if (mp <= LEEKRL_MAX_MOVE_DISTANCE && !path_matters(&env->state, actor, mp))
+            env->moved = actor;
+    }
     status = leekrl_action_execute(&env->fight, actor, action, &result);
     if (status != LEEKRL_ACTION_OK) {
         fail(env, leekrl_action_status_string(status),
@@ -322,13 +430,21 @@ static void step_task(void *context, int index)
 
 static int run(leekrl_vec *vec, leekrl_task task)
 {
+    const leekrl_vec_buffers *out = &vec->buffers;
+    int16_t *legal = out->legal, *held = out->held;
     int i;
     leekrl_threads_run(vec->threads, task, vec, vec->options.envs);
     for (i = 0; i < vec->options.envs; ++i) {
-        if (!vec->envs[i]->error[0]) continue;
-        snprintf(vec->error, sizeof(vec->error), "%s", vec->envs[i]->error);
-        vec->ready = 0;
-        return 0;
+        const environment *env = vec->envs[i];
+        if (env->error[0]) {
+            snprintf(vec->error, sizeof(vec->error), "%s", env->error);
+            vec->ready = 0;
+            return 0;
+        }
+        memcpy(legal, env->list, (size_t)env->n_list * sizeof(*legal));
+        memcpy(held, env->held, (size_t)env->n_held * sizeof(*held));
+        legal += out->legal_counts[i] = env->n_list;
+        held += out->held_counts[i] = env->n_held;
     }
     vec->ready = 1;
     return 1;
@@ -355,14 +471,13 @@ int leekrl_vec_step(leekrl_vec *vec, const int32_t *actions)
 const char *leekrl_vec_error(const leekrl_vec *vec) { return vec ? vec->error : ""; }
 size_t leekrl_vec_actions(const leekrl_vec *vec) { return vec ? vec->actions : 0; }
 size_t leekrl_vec_floats(const leekrl_vec *vec) { return vec ? vec->floats : 0; }
-size_t leekrl_vec_mask_bytes(const leekrl_vec *vec) { return vec ? vec->mask_bytes : 0; }
 
-int leekrl_vec_sizes(size_t *actions, size_t *floats, size_t *mask_bytes)
+int leekrl_vec_sizes(size_t *actions, size_t *floats)
 {
     leekrl_action_catalog *catalog = NULL;
     leekrl_observer *observer;
     size_t count;
-    if (!actions || !floats || !mask_bytes ||
+    if (!actions || !floats ||
         leekrl_action_catalog_create_without(leekrl_solo_excluded_items,
                                              leekrl_solo_excluded_count, &catalog) !=
             LEEKRL_ACTION_OK) return 0;
@@ -371,7 +486,6 @@ int leekrl_vec_sizes(size_t *actions, size_t *floats, size_t *mask_bytes)
     if (observer && leekrl_observer_weapons(observer)) {
         *actions = count;
         *floats = leekrl_observer_float_count(observer);
-        *mask_bytes = (count + 7) / 8;
     } else {
         count = 0;
     }
@@ -435,6 +549,7 @@ void leekrl_vec_layout(leekrl_vec_layout_info *layout)
 {
     if (!layout) return;
     layout->map_cells = LEEKRL_OBS_MAP_CELLS;
+    layout->max_held = LEEKRL_OBS_MAX_HELD;
     layout->reward_parts = LEEKRL_REWARD_PARTS;
     layout->episode_size = LEEKRL_EPISODE_SIZE;
     layout->stats = LEEKRL_STAT_COUNT;
@@ -475,6 +590,33 @@ static int creation_error(leekrl_vec *vec, char *error, size_t size, const char 
     return 0;
 }
 
+/* Tables of actions by symmetry. Destroys the vec on failure. */
+static int turn_actions(leekrl_vec *vec, char *error, size_t error_size)
+{
+    const leekrl_action *actions = leekrl_action_catalog_actions(vec->catalog);
+    int symmetry;
+    size_t i;
+    if (vec->actions > MAX_ACTIONS)
+        return creation_error(vec, error, error_size, "too many actions");
+    for (symmetry = 0; symmetry < LEEKRL_SYMMETRIES; ++symmetry) {
+        vec->turned[symmetry] = malloc(vec->actions * sizeof(int16_t));
+        vec->original[symmetry] = malloc(vec->actions * sizeof(int16_t));
+        if (!vec->turned[symmetry] || !vec->original[symmetry])
+            return creation_error(vec, error, error_size, "out of memory");
+        for (i = 0; i < vec->actions; ++i) {
+            leekrl_action turned = actions[i];
+            size_t index;
+            leekrl_turn(symmetry, &turned.dx, &turned.dy);
+            index = leekrl_action_catalog_find(vec->catalog, &turned);
+            if (index >= vec->actions)
+                return creation_error(vec, error, error_size, "an action cannot be turned");
+            vec->turned[symmetry][i] = (int16_t)index;
+            vec->original[symmetry][index] = (int16_t)i;
+        }
+    }
+    return 1;
+}
+
 leekrl_vec *leekrl_vec_create(const leekrl_vec_options *options,
                               const leekrl_vec_buffers *buffers, char *error,
                               size_t error_size)
@@ -486,7 +628,8 @@ leekrl_vec *leekrl_vec_create(const leekrl_vec_options *options,
         options->threads < 1 || !(options->known_probability >= 0) ||
         options->known_probability > 1 || (unsigned)options->trim > LEEKRL_TRIM_HARMFUL ||
         !leekrl_reward_options_valid(&options->rewards) ||
-        !buffers->floats || !buffers->map || !buffers->mask || !buffers->rewards ||
+        !buffers->floats || !buffers->legal || !buffers->legal_counts || !buffers->held ||
+        !buffers->held_counts || !buffers->place || !buffers->symmetry || !buffers->rewards ||
         !buffers->team || !buffers->first || !buffers->done || !buffers->end_rewards ||
         !buffers->episode) {
         creation_error(NULL, error, error_size, "invalid argument");
@@ -511,7 +654,7 @@ leekrl_vec *leekrl_vec_create(const leekrl_vec_options *options,
     }
     vec->actions = leekrl_action_catalog_count(vec->catalog);
     vec->floats = leekrl_observer_float_count(vec->observer);
-    vec->mask_bytes = (vec->actions + 7) / 8;
+    if (!turn_actions(vec, error, error_size)) return NULL;
     vec->envs = calloc((size_t)options->envs, sizeof(*vec->envs));
     vec->threads = leekrl_threads_create(options->threads);
     if (!vec->envs || !vec->threads) {
@@ -520,8 +663,8 @@ leekrl_vec *leekrl_vec_create(const leekrl_vec_options *options,
     }
     for (i = 0; i < options->envs; ++i) {
         environment *env = vec->envs[i] = calloc(1, sizeof(**vec->envs));
-        if (env) env->legal = malloc(vec->actions);
-        if (!env || !env->legal) {
+        if (env) env->list = malloc(vec->actions * sizeof(*env->list));
+        if (!env || !env->list) {
             creation_error(vec, error, error_size, "out of memory");
             return NULL;
         }
@@ -541,10 +684,14 @@ void leekrl_vec_destroy(leekrl_vec *vec)
     for (i = 0; vec->envs && i < vec->options.envs; ++i) {
         if (!vec->envs[i]) continue;
         stop_fight(vec->envs[i]);
-        free(vec->envs[i]->legal);
+        free(vec->envs[i]->list);
         free(vec->envs[i]);
     }
     free(vec->envs);
+    for (i = 0; i < LEEKRL_SYMMETRIES; ++i) {
+        free(vec->turned[i]);
+        free(vec->original[i]);
+    }
     free(vec->known);
     free(vec->weights);
     leekrl_build_pool_destroy(vec->pool);

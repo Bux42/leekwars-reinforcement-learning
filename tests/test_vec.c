@@ -1,4 +1,6 @@
 #include "leekrl/item_snapshot.h"
+#include "leekrl/rules.h"
+#include "leekrl/symmetry.h"
 #include "leekrl/threads.h"
 #include "leekrl/vec.h"
 
@@ -16,7 +18,7 @@ typedef struct {
     leekrl_vec_buffers b;
     leekrl_vec *vec;
     int32_t *actions;
-    size_t n, floats, mask_bytes, count;
+    size_t n, floats, count;
 } session;
 
 static uint64_t next_random(uint64_t *state)
@@ -31,15 +33,20 @@ static void open_session(session *s, int envs, int threads, uint64_t seed)
 {
     char error[256];
     memset(&s->b, 0, sizeof(s->b));
-    CHECK(leekrl_vec_sizes(&s->count, &s->floats, &s->mask_bytes));
-    CHECK(s->floats == 2705 && s->count == 10566 && s->mask_bytes == 1321);
+    CHECK(leekrl_vec_sizes(&s->count, &s->floats));
+    CHECK(s->floats == 2705 && s->count == 10566);
     s->n = (size_t)envs;
     s->options.envs = envs;
     s->options.threads = threads;
     s->options.seed = seed;
     s->b.floats = malloc(s->n * s->floats * sizeof(float));
     s->b.map = malloc(s->n * LEEKRL_OBS_MAP_CELLS);
-    s->b.mask = malloc(s->n * s->mask_bytes);
+    s->b.legal = malloc(s->n * s->count * sizeof(int16_t));
+    s->b.legal_counts = calloc(s->n, sizeof(int32_t));
+    s->b.held = malloc(s->n * LEEKRL_OBS_MAX_HELD * sizeof(int16_t));
+    s->b.held_counts = calloc(s->n, sizeof(int32_t));
+    s->b.place = calloc(s->n, sizeof(int16_t));
+    s->b.symmetry = calloc(s->n, 1);
     s->b.rewards = calloc(s->n * LEEKRL_REWARD_PARTS, sizeof(float));
     s->b.team = calloc(s->n, 1);
     s->b.first = calloc(s->n, 1);
@@ -47,7 +54,7 @@ static void open_session(session *s, int envs, int threads, uint64_t seed)
     s->b.end_rewards = calloc(s->n * 2 * LEEKRL_REWARD_PARTS, sizeof(float));
     s->b.episode = calloc(s->n * LEEKRL_EPISODE_SIZE, sizeof(float));
     s->actions = calloc(s->n, sizeof(*s->actions));
-    CHECK(s->b.floats && s->b.map && s->b.mask && s->b.episode && s->actions);
+    CHECK(s->b.floats && s->b.map && s->b.legal && s->b.held && s->b.episode && s->actions);
     s->vec = leekrl_vec_create(&s->options, &s->b, error, sizeof(error));
     if (!s->vec) {
         fprintf(stderr, "%s\n", error);
@@ -61,7 +68,12 @@ static void close_session(session *s)
     leekrl_vec_destroy(s->vec);
     free(s->b.floats);
     free(s->b.map);
-    free(s->b.mask);
+    free(s->b.legal);
+    free(s->b.legal_counts);
+    free(s->b.held);
+    free(s->b.held_counts);
+    free(s->b.place);
+    free(s->b.symmetry);
     free(s->b.rewards);
     free(s->b.team);
     free(s->b.first);
@@ -71,17 +83,23 @@ static void close_session(session *s)
     free(s->actions);
 }
 
+/* Legal actions of an environment. */
+static const int16_t *legal_of(const session *s, size_t env)
+{
+    const int16_t *list = s->b.legal;
+    size_t i;
+    for (i = 0; i < env; ++i) list += s->b.legal_counts[i];
+    return list;
+}
+
 /* A random legal action, decided by the seed and what the environment shows. */
 static int32_t choose(const session *s, size_t env, uint64_t *rng)
 {
-    const uint8_t *mask = s->b.mask + env * s->mask_bytes;
-    size_t i, legal = 0, pick;
-    for (i = 0; i < s->count; ++i) legal += (mask[i >> 3] >> (i & 7)) & 1;
-    CHECK(legal > 0 && (mask[0] & 1));
-    pick = (size_t)(next_random(rng) % legal);
-    for (i = 0; i < s->count; ++i)
-        if (((mask[i >> 3] >> (i & 7)) & 1) && pick-- == 0) return (int32_t)i;
-    return -1;
+    const int16_t *list = legal_of(s, env);
+    int32_t n = s->b.legal_counts[env], i;
+    CHECK(n > 0 && list[0] == 0);
+    for (i = 1; i < n; ++i) CHECK(list[i] > list[i - 1] && (size_t)list[i] < s->count);
+    return list[next_random(rng) % (uint64_t)n];
 }
 
 static void must(session *s, int ok)
@@ -101,7 +119,7 @@ static uint64_t play_hash(int envs, int threads, uint64_t seed, int steps, doubl
 {
     session s;
     uint64_t hash = UINT64_C(0xCBF29CE484222325), rng = 9;
-    size_t i;
+    size_t i, legal, held;
     leekrl_vec_options_init(&s.options);
     s.options.known_probability = known;
     open_session(&s, envs, threads, seed);
@@ -109,7 +127,16 @@ static uint64_t play_hash(int envs, int threads, uint64_t seed, int steps, doubl
     while (steps--) {
         hash_bytes(&hash, s.b.floats, s.n * s.floats * sizeof(float));
         hash_bytes(&hash, s.b.map, s.n * LEEKRL_OBS_MAP_CELLS);
-        hash_bytes(&hash, s.b.mask, s.n * s.mask_bytes);
+        hash_bytes(&hash, s.b.legal_counts, s.n * sizeof(int32_t));
+        hash_bytes(&hash, s.b.held_counts, s.n * sizeof(int32_t));
+        for (i = legal = held = 0; i < s.n; ++i) {
+            legal += (size_t)s.b.legal_counts[i];
+            held += (size_t)s.b.held_counts[i];
+        }
+        hash_bytes(&hash, s.b.legal, legal * sizeof(int16_t));
+        hash_bytes(&hash, s.b.held, held * sizeof(int16_t));
+        hash_bytes(&hash, s.b.place, s.n * sizeof(int16_t));
+        hash_bytes(&hash, s.b.symmetry, s.n);
         hash_bytes(&hash, s.b.rewards, s.n * LEEKRL_REWARD_PARTS * sizeof(float));
         hash_bytes(&hash, s.b.team, s.n);
         hash_bytes(&hash, s.b.first, s.n);
@@ -226,12 +253,9 @@ static void test_forced(void)
         open_session(&s, 8, 2, 4);
         must(&s, leekrl_vec_reset(s.vec));
         for (step = 0; step < 1500; ++step) {
-            size_t i, k;
+            size_t i;
             for (i = 0; i < s.n; ++i) {
-                const uint8_t *mask = s.b.mask + i * s.mask_bytes;
-                int any = mask[0] & ~1;
-                for (k = 1; k < s.mask_bytes; ++k) any |= mask[k];
-                forced[skip] += !any;
+                forced[skip] += s.b.legal_counts[i] == 1;
                 s.actions[i] = choose(&s, i, &rng);
             }
             must(&s, leekrl_vec_step(s.vec, s.actions));
@@ -240,6 +264,149 @@ static void test_forced(void)
     }
     printf("decisions with a single choice: %ld kept, %ld once skipped\n", forced[0], forced[1]);
     CHECK(forced[0] > 0 && forced[1] == 0);
+}
+
+/* Turned, the same actions give the same fights, seen turned. */
+static void test_facing(void)
+{
+    session a, b;
+    leekrl_action_catalog *catalog;
+    const leekrl_action *actions;
+    uint64_t rng = 21;
+    long met[LEEKRL_SYMMETRIES] = {0};
+    const int size = LEEKRL_OBS_ENTITY_SIZE;
+    int step;
+    CHECK(leekrl_action_catalog_create_without(leekrl_solo_excluded_items,
+              leekrl_solo_excluded_count, &catalog) == LEEKRL_ACTION_OK);
+    actions = leekrl_action_catalog_actions(catalog);
+    leekrl_vec_options_init(&a.options);
+    leekrl_vec_options_init(&b.options);
+    CHECK(a.options.face_enemy);
+    a.options.face_enemy = 0;
+    open_session(&a, 24, 4, 33);
+    open_session(&b, 24, 4, 33);
+    must(&a, leekrl_vec_reset(a.vec));
+    must(&b, leekrl_vec_reset(b.vec));
+    for (step = 0; step < 1500; ++step) {
+        size_t i, k;
+        for (i = 0; i < a.n; ++i) {
+            const float *f = a.b.floats + i * a.floats, *g = b.b.floats + i * b.floats;
+            const int16_t *list = legal_of(&a, i), *turned = legal_of(&b, i);
+            int symmetry = b.b.symmetry[i], n = a.b.legal_counts[i], enemy = 0, e, j;
+            uint8_t seen[10566] = {0};
+            leekrl_action action;
+            ++met[symmetry];
+            CHECK(a.b.symmetry[i] == 0 && symmetry < LEEKRL_SYMMETRIES);
+            CHECK(n == b.b.legal_counts[i] && a.b.held_counts[i] == b.b.held_counts[i]);
+            for (k = 0; k < (size_t)n; ++k) seen[turned[k]] = 1;
+            for (k = 0; k < (size_t)n; ++k) {
+                action = actions[list[k]];
+                leekrl_turn(symmetry, &action.dx, &action.dy);
+                CHECK(seen[leekrl_action_catalog_find(catalog, &action)]);
+            }
+            for (k = 0; k < a.floats; ++k) {
+                int offset = (int)k - LEEKRL_OBS_ENTITIES, field = offset % size;
+                int dx, dy;
+                if (offset < 0 || k >= LEEKRL_OBS_ITEMS ||
+                    (field != LEEKRL_OBS_DX && field != LEEKRL_OBS_DY)) {
+                    CHECK(f[k] == g[k]);
+                } else if (field == LEEKRL_OBS_DX) {
+                    dx = (int)lround(f[k] * LEEKRL_OBS_MAP_RADIUS);
+                    dy = (int)lround(f[k + 1] * LEEKRL_OBS_MAP_RADIUS);
+                    leekrl_turn(symmetry, &dx, &dy);
+                    CHECK((int)lround(g[k] * LEEKRL_OBS_MAP_RADIUS) == dx);
+                    CHECK((int)lround(g[k + 1] * LEEKRL_OBS_MAP_RADIUS) == dy);
+                }
+            }
+            for (e = 0; e < LEEKRL_OBS_MAX_ENTITIES; ++e) {
+                const float *block = g + LEEKRL_OBS_ENTITIES + e * size;
+                if (!block[LEEKRL_OBS_PRESENT] || block[LEEKRL_OBS_ALLY] ||
+                    !block[LEEKRL_OBS_TYPE]) continue;
+                ++enemy;
+                CHECK(block[LEEKRL_OBS_DY] >= 0 &&
+                      block[LEEKRL_OBS_DX] >= block[LEEKRL_OBS_DY]);
+            }
+            CHECK(enemy == 1);
+            j = (int)(next_random(&rng) % (uint64_t)n);
+            a.actions[i] = list[j];
+            action = actions[list[j]];
+            leekrl_turn(symmetry, &action.dx, &action.dy);
+            b.actions[i] = (int32_t)leekrl_action_catalog_find(catalog, &action);
+        }
+        must(&a, leekrl_vec_step(a.vec, a.actions));
+        must(&b, leekrl_vec_step(b.vec, b.actions));
+        CHECK(!memcmp(a.b.team, b.b.team, a.n) && !memcmp(a.b.first, b.b.first, a.n) &&
+              !memcmp(a.b.done, b.b.done, a.n));
+        CHECK(!memcmp(a.b.rewards, b.b.rewards, a.n * LEEKRL_REWARD_PARTS * sizeof(float)));
+        CHECK(!memcmp(a.b.end_rewards, b.b.end_rewards,
+                      a.n * 2 * LEEKRL_REWARD_PARTS * sizeof(float)));
+        CHECK(!memcmp(a.b.episode, b.b.episode, a.n * LEEKRL_EPISODE_SIZE * sizeof(float)));
+    }
+    for (step = 0; step < LEEKRL_SYMMETRIES; ++step) CHECK(met[step] > 100);
+    close_session(&a);
+    close_session(&b);
+    leekrl_action_catalog_destroy(catalog);
+}
+
+/* An entity that has just moved cannot move, but if a plant can awaken. */
+static void test_repeated_moves(void)
+{
+    session s;
+    uint64_t rng = 5;
+    long again[2] = {0, 0}, plants = 0, decisions[2] = {0, 0};
+    const int size = LEEKRL_OBS_ENTITY_SIZE;
+    int repeat, step;
+    for (repeat = 0; repeat < 2; ++repeat) {
+        /* Who decided last, if it moved: its block, team and turn. */
+        float (*last)[LEEKRL_OBS_ENTITY_SIZE] = malloc(64 * sizeof(*last));
+        int moved[64] = {0}, team[64] = {0};
+        float turn[64] = {0};
+        CHECK(last);
+        leekrl_vec_options_init(&s.options);
+        CHECK(!s.options.repeat_moves);
+        s.options.repeat_moves = repeat;
+        open_session(&s, 64, 4, 77);
+        must(&s, leekrl_vec_reset(s.vec));
+        for (step = 0; step < 4000; ++step) {
+            size_t i;
+            for (i = 0; i < s.n; ++i) {
+                const float *f = s.b.floats + i * s.floats, *me = f + LEEKRL_OBS_ENTITIES;
+                const int16_t *list = legal_of(&s, i);
+                int moves = s.b.legal_counts[i] > 1 && list[1] <= LEEKRL_MOVE_ACTION_COUNT, e;
+                int plant = 0, same;
+                /* Near enough to have been in reach of the first move. */
+                for (e = 0; e < LEEKRL_OBS_MAX_ENTITIES; ++e)
+                    plant |= me[e * size + LEEKRL_OBS_ZONE] > 0 &&
+                        me[e * size + LEEKRL_OBS_DISTANCE] * LEEKRL_OBS_MAP_RADIUS <=
+                        me[e * size + LEEKRL_OBS_ZONE] * 10 + 2 * last[i][LEEKRL_OBS_MP] * 15 + 0.5f;
+                same = moved[i] && !s.b.done[i] && team[i] == s.b.team[i] && turn[i] == f[LEEKRL_OBS_TURN] &&
+                       !memcmp(last[i] + LEEKRL_OBS_TYPE, me + LEEKRL_OBS_TYPE,
+                               (1 + LEEKRL_OBS_SUMMON_TYPES) * sizeof(float)) &&
+                       last[i][LEEKRL_OBS_TOTAL_LIFE] == me[LEEKRL_OBS_TOTAL_LIFE] &&
+                       me[LEEKRL_OBS_MP] < last[i][LEEKRL_OBS_MP] &&
+                       me[LEEKRL_OBS_TP] == last[i][LEEKRL_OBS_TP] &&
+                       last[i][LEEKRL_OBS_MP] * 15 < LEEKRL_MAX_MOVE_DISTANCE + 0.5f;
+                ++decisions[repeat];
+                if (same && moves) {
+                    ++again[repeat];
+                    plants += !repeat;
+                    if (!repeat) CHECK(plant);
+                }
+                s.actions[i] = choose(&s, i, &rng);
+                moved[i] = s.actions[i] >= 1 && s.actions[i] <= LEEKRL_MOVE_ACTION_COUNT;
+                memcpy(last[i], me, sizeof(last[i]));
+                team[i] = s.b.team[i];
+                turn[i] = f[LEEKRL_OBS_TURN];
+            }
+            must(&s, leekrl_vec_step(s.vec, s.actions));
+        }
+        close_session(&s);
+        free(last);
+    }
+    printf("moves possible right after a move: %.1f%% of decisions allowed, %.2f%% not (plants)\n",
+           100.0 * (double)again[1] / (double)decisions[1],
+           100.0 * (double)again[0] / (double)decisions[0]);
+    CHECK(again[1] > decisions[1] / 5 && again[0] < again[1] / 3 && plants);
 }
 
 static void test_known_builds(void)
@@ -313,6 +480,7 @@ static void test_errors(void)
     session s;
     char error[256];
     leekrl_vec_options bad;
+    const int16_t *list;
     int32_t illegal = -1;
     size_t i;
     leekrl_vec_options_init(&s.options);
@@ -326,9 +494,13 @@ static void test_errors(void)
     bad = s.options;
     bad.rewards.action_scale = 0;
     CHECK(!leekrl_vec_create(&bad, &s.b, error, sizeof(error)));
+    bad = s.options;
+    bad.trim = (leekrl_trim)3;
+    CHECK(!leekrl_vec_create(&bad, &s.b, error, sizeof(error)));
     must(&s, leekrl_vec_reset(s.vec));
-    for (i = 0; i < s.count && illegal < 0; ++i)
-        if (!((s.b.mask[2 * s.mask_bytes + (i >> 3)] >> (i & 7)) & 1)) illegal = (int32_t)i;
+    /* The first action that the list skips. */
+    for (i = 0, list = legal_of(&s, 2); illegal < 0; ++i)
+        if (i == (size_t)s.b.legal_counts[2] || list[i] != (int16_t)i) illegal = (int32_t)i;
     s.actions[2] = illegal;
     CHECK(!leekrl_vec_step(s.vec, s.actions));
     CHECK(strstr(leekrl_vec_error(s.vec), "environment 2") &&
@@ -359,8 +531,8 @@ static void test_threads(void)
 int main(void)
 {
     char error[512];
-    size_t a, b, c;
-    CHECK(!leekrl_vec_sizes(&a, &b, &c));
+    size_t a, b;
+    CHECK(!leekrl_vec_sizes(&a, &b));
     if (!leekrl_item_snapshot_register(error, sizeof(error))) {
         fprintf(stderr, "item registration: %s\n", error);
         return 1;
@@ -368,6 +540,8 @@ int main(void)
     test_threads();
     test_errors();
     test_determinism();
+    test_facing();
+    test_repeated_moves();
     test_forced();
     test_known_builds();
     test_fights();

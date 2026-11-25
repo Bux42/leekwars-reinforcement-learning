@@ -105,6 +105,10 @@ leekrl_action_status leekrl_action_mask(struct LwFight *fight,
                                         const leekrl_action *actions,
                                         size_t count, uint8_t *mask);
 
+/* Index of an action in the catalog, or its count if it is not there. */
+size_t leekrl_action_catalog_find(const leekrl_action_catalog *catalog,
+                                  const leekrl_action *action);
+
 /*
  * Same result as leekrl_action_mask over the whole catalog, but only looks at
  * reachable cells and at the actor's items. mask holds one byte per action.

@@ -10,22 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-
-_shifts = {}
-
-
-def unpack(bits, actions):
-    """Masks as booleans, from the environment's packed bits (tensor or array)."""
-    if isinstance(bits, np.ndarray):
-        return torch.from_numpy(
-            np.unpackbits(bits, axis=1, count=actions, bitorder="little").view(bool))
-    if bits.device.type == "cpu":
-        return unpack(bits.numpy(), actions)
-    shifts = _shifts.get(bits.device)
-    if shifts is None:
-        shifts = _shifts[bits.device] = torch.arange(8, dtype=torch.uint8, device=bits.device)
-    flat = ((bits.unsqueeze(2) >> shifts) & 1).bool().flatten(1)
-    return flat[:, :actions]
+from .model import Inputs, Legal, gather
 
 
 def advantages(team, first, done, rewards, end_rewards, values, last, gamma, lam):
@@ -80,59 +65,89 @@ def advantages(team, first, done, rewards, end_rewards, values, last, gamma, lam
 
 class Rollout:
     """Decisions of one rollout. What the network needs stays on its device, the rest in
-    arrays of shape (steps, envs, ...)."""
+    arrays of shape (steps, envs, ...). Lists of varying lengths are kept one after the
+    other, with their sizes on the CPU."""
 
     def __init__(self, env, steps, device="cpu"):
         n = env.envs
-        self.steps, self.envs, self.actions_count = steps, n, env.actions
+        self.steps, self.envs = steps, n
         self.device = torch.device(device)
         self.floats = torch.zeros((steps, n, env.float_count), device=device)
-        self.map = torch.zeros((steps, n, env.map_cells), dtype=torch.uint8, device=device)
-        self.mask = torch.zeros((steps, n, env.mask_bytes), dtype=torch.uint8, device=device)
-        self.actions = torch.zeros((steps, n), dtype=torch.long, device=device)
+        self.place = torch.zeros((steps, n), dtype=torch.long, device=device)
+        # Each action is kept as its position in the list of legal ones.
+        self.choices = torch.zeros((steps, n), dtype=torch.long, device=device)
         self.log_probs = torch.zeros((steps, n), device=device)
+        self.estimates = torch.zeros((steps, n), device=device)
+        self.lists = {"legal": [None] * steps, "held": [None] * steps}
+        self.sizes = {"legal": torch.zeros((steps, n), dtype=torch.long),
+                      "held": torch.zeros((steps, n), dtype=torch.long)}
         self.team = np.zeros((steps, n), np.uint8)
         self.first = np.zeros((steps, n), np.uint8)
         self.done = np.zeros((steps, n), np.uint8)
         self.rewards = np.zeros((steps, n), np.float32)
         self.end_rewards = np.zeros((steps, n, 2), np.float32)
-        self.values = np.zeros((steps, n), np.float32)
         self.trained = np.ones((steps, n), bool)
-        self.advantages = self.returns = self.valid = None
+        self.values = self.advantages = self.returns = self.valid = None
 
     def save(self, t, env):
         """Keep the pending decisions, and return the inputs of the network."""
-        for name in ("floats", "map", "mask"):
-            getattr(self, name)[t].copy_(torch.from_numpy(getattr(env, name)))
+        self.floats[t].copy_(torch.from_numpy(env.floats), non_blocking=True)
+        self.place[t] = torch.from_numpy(env.place.astype(np.int64)).to(self.device)
+        for name, values, sizes in (("legal", env.legal_actions, env.legal_counts),
+                                    ("held", env.held, env.held_counts)):
+            # A copy, even on the CPU: the environment writes there again.
+            self.lists[name][t] = torch.from_numpy(values).to(self.device, non_blocking=True,
+                                                              copy=True)
+            self.sizes[name][t] = torch.from_numpy(sizes)
         for name in ("team", "first", "done"):
             getattr(self, name)[t] = getattr(env, name)
         self.rewards[t] = env.rewards.sum(1)
         self.end_rewards[t] = env.end_rewards.sum(2)
-        return self.map[t], self.floats[t], unpack(self.mask[t], self.actions_count)
+        return Inputs(self.floats[t], self.place[t], self.lists["held"][t],
+                      self.sizes["held"][t],
+                      Legal(self.lists["legal"][t], self.sizes["legal"][t]))
 
     def finish(self, env, last_value, gamma, lam):
         last = (env.team, env.first, env.done, env.rewards.sum(1), env.end_rewards.sum(2),
                 last_value)
+        self.values = self.estimates.cpu().numpy()
         self.advantages, self.valid = advantages(
             self.team, self.first, self.done, self.rewards, self.end_rewards, self.values,
             last, gamma, lam)
         self.valid &= self.trained
         self.returns = self.advantages + self.values
 
+    def pick(self, picked):
+        """Inputs of some decisions, given by their positions in a flattened rollout."""
+        device = self.device
+        there = picked.to(device, non_blocking=True)
+        lists = {}
+        for name in ("legal", "held"):
+            sizes = self.sizes[name].flatten()
+            chosen = sizes[picked]
+            lists[name] = (*gather(*self._flat[name], there, chosen), chosen)
+        actions, rows, sizes = lists["legal"]
+        held, held_rows, held_sizes = lists["held"]
+        return Inputs(self.floats.flatten(0, 1)[there], self.place.flatten()[there], held,
+                      held_sizes, Legal(actions, sizes, rows), held_rows), there
+
     def minibatches(self, size, generator):
-        """Shuffled minibatches of the decisions to learn from."""
+        """Shuffled minibatches of the decisions to learn from: inputs, and the rest."""
         chosen = torch.from_numpy(np.flatnonzero(self.valid.reshape(-1)))
         order = torch.randperm(len(chosen), generator=generator)
-        flat = {name: getattr(self, name).flatten(0, 1)
-                for name in ("floats", "map", "mask", "actions", "log_probs")}
+        self._flat = {}
+        for name, lists in self.lists.items():
+            sizes = self.sizes[name].flatten()
+            self._flat[name] = (torch.cat(lists), (sizes.cumsum(0) - sizes).to(self.device),
+                                sizes.to(self.device))
+        flat = {name: getattr(self, name).flatten() for name in ("choices", "log_probs")}
         for name in ("advantages", "returns"):
             flat[name] = torch.from_numpy(getattr(self, name).reshape(-1)).to(self.device)
         for start in range(0, len(chosen), size):
             # Reading memory in order is faster.
-            picked = chosen[order[start:start + size]].sort().values.to(self.device)
-            batch = {name: tensor[picked] for name, tensor in flat.items()}
-            batch["mask"] = unpack(batch["mask"], self.actions_count)
-            yield batch
+            picked = chosen[order[start:start + size]].sort().values
+            inputs, there = self.pick(picked)
+            yield inputs, {name: tensor[there] for name, tensor in flat.items()}
 
 
 @dataclass
@@ -159,9 +174,9 @@ def update(model, optimizer, rollout, config, generator):
     for _ in range(config.epochs):
         before = totals.clone()
         batches = 0
-        for batch in rollout.minibatches(config.minibatch, generator):
-            distribution, value = model(batch["map"], batch["floats"], batch["mask"])
-            log_prob = distribution.log_probs[distribution.find(batch["actions"])]
+        for inputs, batch in rollout.minibatches(config.minibatch, generator):
+            distribution, value = model(inputs)
+            log_prob = distribution.log_probs[inputs.legal.offsets + batch["choices"]]
             log_ratio = log_prob - batch["log_probs"]
             ratio = log_ratio.exp()
             advantage = batch["advantages"]

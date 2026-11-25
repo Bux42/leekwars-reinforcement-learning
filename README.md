@@ -163,8 +163,12 @@ from leekrl import VecEnv, load_known_builds
 
 env = VecEnv(256, seed=1, known_builds=load_known_builds())
 env.reset()
+env.floats, env.legal_actions, env.legal_counts  # the latter are lists, see VecEnv
 env.step(actions)  # one legal action per environment
 ```
+
+By default the world is turned to face the enemy, casts that are useless or can only harm
+their team are not legal, nor are moves right after a move: see `adr/observation.md`.
 
 Rewards belong to the previous decision of the team that decides now: see `vec.h`.
 The package looks for the C library under `build*/`, or at `LEEKRL_LIBRARY`. Known
@@ -184,8 +188,9 @@ Every setting of `Config` in `python/leekrl/train.py` is an option. Runs go to
 `runs/<name>`: settings, `metrics.jsonl` and checkpoints. `--deterministic` gives identical
 results for identical settings on the same machine. `--wandb online` sends metrics and
 settings to Weights & Biases, after `wandb login`, without the email, computer name or
-paths W&B normally adds; `--wandb offline` keeps them in the run folder. To stop early, press Ctrl+C or create a file named `stop` in the run's folder: the
-current update is finished and a checkpoint saved, to continue with `--resume`.
+paths W&B normally adds; `--wandb offline` keeps them in the run folder. To stop early,
+press Ctrl+C or create a file named `stop` in the run's folder: the current update is
+finished and a checkpoint saved, to continue with `--resume`.
 
 The network's size is set by `--branch` (width of what each kind of input becomes),
 `--hidden` and `--layers`.

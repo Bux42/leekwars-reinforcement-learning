@@ -17,6 +17,8 @@ extern "C" {
 #define LEEKRL_OBS_MAP_RADIUS 34
 #define LEEKRL_OBS_MAP_CELLS 2381
 #define LEEKRL_OBS_MAP_CENTER 1190
+#define LEEKRL_OBS_MAX_HELD 613 /* cells of a map */
+#define LEEKRL_OBS_PLACES 35    /* columns, and rows, of the positions of the map's center */
 #define LEEKRL_OBS_MAX_ENTITIES 18
 #define LEEKRL_OBS_SUMMON_TYPES 13
 #define LEEKRL_OBS_SUMMON_CHIPS 6
@@ -108,16 +110,42 @@ int leekrl_obs_state_index(int state_id);
 /* Index of a relative cell in the map, or -1 if farther than the radius. */
 int leekrl_obs_map_index(int dx, int dy);
 
+/* Obstacles of a map. They never change during a fight. */
+typedef struct {
+    int n;
+    int16_t x[LEEKRL_OBS_MAX_HELD];
+    int16_t y[LEEKRL_OBS_MAX_HELD];
+} leekrl_obstacles;
+
+/* Returns 0 if the map has too many cells. */
+int leekrl_obstacles_find(struct LwFight *fight, leekrl_obstacles *obstacles);
+
 /*
- * Write leekrl_observer_float_count floats and LEEKRL_OBS_MAP_CELLS bytes. actor
- * must be alive and in the turn order of the fight. Thread-safe if fights are
- * distinct. Returns 1, or 0 if the situation cannot be represented: the outputs
- * are then unspecified and error describes the problem. This is a limit of the
- * layout to fix, not something to ignore.
+ * Where an observation is written. The map comes in two forms. map holds a category
+ * per cell of the radius. held and place say as much, as a list: for each cell of
+ * the map that is not free, in no particular order, its index in map x 6 + its
+ * category - LEEKRL_CELL_OBSTACLE; and where the center of the map is from the
+ * acting entity, (dy + 17) x 35 + dx + 17.
+ */
+typedef struct {
+    float *floats;  /* leekrl_observer_float_count */
+    uint8_t *map;   /* LEEKRL_OBS_MAP_CELLS, or NULL */
+    int16_t *held;  /* LEEKRL_OBS_MAX_HELD */
+    int held_count;
+    int place;
+} leekrl_observation;
+
+/*
+ * Observe from the point of view of actor, which must be alive and in the turn order
+ * of the fight. Everything that has a direction is turned by the symmetry, see
+ * leekrl/symmetry.h. obstacles are those of the map, or NULL to look for them.
+ * Thread-safe if fights are distinct. Returns 1, or 0 if the situation cannot be
+ * represented: the outputs are then unspecified and error describes the problem.
+ * This is a limit of the layout to fix, not something to ignore.
  */
 int leekrl_observe(const leekrl_observer *observer, struct LwFight *fight,
-                   struct LwEntity *actor, float *floats, uint8_t *map,
-                   char *error, size_t error_size);
+                   struct LwEntity *actor, int symmetry, const leekrl_obstacles *obstacles,
+                   leekrl_observation *out, char *error, size_t error_size);
 
 #ifdef __cplusplus
 }

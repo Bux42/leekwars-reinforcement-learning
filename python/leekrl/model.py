@@ -1,7 +1,7 @@
 """Policy and value network.
 
-Most inputs and nearly all actions are zeros. Maps and masks are therefore handled as
-lists of indices, which is several times faster on CPU than dense arrays.
+Most inputs and nearly all actions are zeros. The map and the legal actions are therefore
+lists of indices.
 
 The map has a fixed shape: the cells outside it only depend on where the acting entity
 stands. The network gets that position, and only the cells that hold something.
@@ -14,9 +14,10 @@ from .vec import action_table
 
 MAP_CELLS = 2381
 MAP_RADIUS = 34
-REAL_CELLS = 613
 CATEGORIES = 8
 FREE = 1
+HELD = CATEGORIES - FREE - 1        # categories of the cells that hold something
+PLACES = 35 ** 2                    # where the map can be
 
 # Entity blocks in the floats: see specs/Observation.md.
 ENTITY_START, ENTITY_SIZE, ENTITIES = 3, 116, 18
@@ -38,15 +39,64 @@ def map_index(dx, dy):
     return torch.where(dy <= 0, above, below) + dx + radius - dy.abs()
 
 
+def gather(values, offsets, counts, picked, sizes):
+    """The lists of some rows, from the lists of all rows, one after the other.
+
+    offsets and counts tell where the list of each row is. sizes is counts[picked], on the
+    CPU. Returns the lists, and for each of their values the row it comes from.
+    """
+    total = int(sizes.sum())
+    chosen = counts[picked]
+    rows = torch.repeat_interleave(torch.arange(len(picked), device=values.device), chosen,
+                                   output_size=total)
+    starts = chosen.cumsum(0) - chosen
+    where = torch.arange(total, device=values.device) + (offsets[picked] - starts)[rows]
+    return values[where], rows
+
+
 class Legal:
     """The legal actions of a batch, as flat lists of (row, action) pairs, by row."""
 
-    def __init__(self, mask):
-        self.rows, self.actions = mask.nonzero(as_tuple=True)
-        # Counting the pairs is much faster than summing the mask.
-        self.counts = torch.bincount(self.rows, minlength=mask.shape[0])
-        self.offsets = torch.cat([self.counts.new_zeros(1), self.counts.cumsum(0)[:-1]])
-        self.batch = mask.shape[0]
+    def __init__(self, actions, sizes, rows=None):
+        """sizes are the numbers of legal actions, on the CPU."""
+        device = actions.device
+        self.batch = len(sizes)
+        self.actions = actions.long()
+        self.sizes = sizes.long()
+        self.starts = self.sizes.cumsum(0) - self.sizes
+        self.offsets = self.starts.to(device, non_blocking=True)
+        if rows is None:
+            rows = torch.repeat_interleave(torch.arange(self.batch, device=device),
+                                           self.sizes.to(device, non_blocking=True),
+                                           output_size=len(actions))
+        self.rows = rows
+
+
+class Inputs:
+    """What the network receives for a batch of decisions."""
+
+    def __init__(self, floats, place, held, held_sizes, legal, held_rows=None):
+        """held holds a code per cell that is not free, held_sizes their numbers, on the CPU."""
+        self.floats = floats
+        self.place = place.long()
+        self.held = held.long()
+        self.held_sizes = held_sizes.long()
+        self.held_offsets = (self.held_sizes.cumsum(0) - self.held_sizes).to(
+            floats.device, non_blocking=True)
+        self.held_rows = held_rows
+        self.legal = legal
+
+    def cells(self):
+        """Category of each cell. Those outside the map are said to be free."""
+        device, batch = self.floats.device, len(self.floats)
+        rows = self.held_rows
+        if rows is None:
+            rows = torch.repeat_interleave(torch.arange(batch, device=device),
+                                           self.held_sizes.to(device),
+                                           output_size=len(self.held))
+        cells = torch.full((batch, MAP_CELLS), FREE, device=device)
+        cells[rows, self.held // HELD] = self.held % HELD + FREE + 1
+        return cells
 
 
 class Distribution:
@@ -67,22 +117,21 @@ class Distribution:
         return -zeros.index_add(0, self.legal.rows, self.probs * self.log_probs)
 
     def sample(self, generator=None):
-        """Positions in the flat lists, one per row."""
-        # On CPU: short lists, and floating-point cumsum is not deterministic on GPU.
+        """Positions in the flat lists, one per row, on the CPU."""
+        # There: short lists, and floating-point cumsum is not deterministic on GPU.
         legal = self.legal
-        offsets, counts = legal.offsets.cpu(), legal.counts.cpu()
         cumulated = self.probs.detach().cpu().double().cumsum(0)
-        ends = cumulated[offsets + counts - 1]
+        ends = cumulated[legal.starts + legal.sizes - 1]
         starts = torch.cat([ends.new_zeros(1), ends[:-1]])
         uniform = torch.rand(legal.batch, dtype=torch.float64, generator=generator)
         position = torch.searchsorted(cumulated, starts + uniform * (ends - starts),
                                       right=True)
         # Rounding must never leave the row.
-        position = torch.minimum(torch.maximum(position, offsets), offsets + counts - 1)
-        return position.to(self.probs.device)
+        return torch.minimum(torch.maximum(position, legal.starts),
+                             legal.starts + legal.sizes - 1)
 
     def best(self):
-        """Positions of the likeliest actions, the first one on ties."""
+        """Positions of the likeliest actions, the first one on ties, on the CPU."""
         legal = self.legal
         largest = torch.full((legal.batch,), -torch.inf, dtype=self.log_probs.dtype,
                              device=self.log_probs.device)
@@ -91,17 +140,7 @@ class Distribution:
         rows = legal.rows[candidates]
         first = torch.ones_like(rows, dtype=torch.bool)
         first[1:] = rows[1:] != rows[:-1]
-        return candidates[first]
-
-    def find(self, actions):
-        """Positions of given actions, one per row. They must be legal."""
-        legal = self.legal
-        keys = legal.rows * (1 << 32) + legal.actions
-        wanted = torch.arange(legal.batch, device=actions.device) * (1 << 32) + actions
-        position = torch.searchsorted(keys, wanted)
-        if not torch.equal(keys[position.clamp(max=len(keys) - 1)], wanted):
-            raise ValueError("illegal action")
-        return position
+        return candidates[first].cpu()
 
 
 class FlatHead(nn.Module):
@@ -114,9 +153,10 @@ class FlatHead(nn.Module):
         nn.init.normal_(self.logits.weight, std=0.001)
         nn.init.zeros_(self.logits.bias)
 
-    def forward(self, hidden, cells, floats, legal):
+    def forward(self, hidden, inputs):
         # Every output is computed: gathering the weights of the legal ones only is no
         # faster, and takes far more memory.
+        legal = inputs.legal
         return self.logits(hidden)[legal.rows, legal.actions]
 
 
@@ -161,10 +201,11 @@ class PairHead(nn.Module):
         nn.init.zeros_(self.entity.bias)
         nn.init.normal_(self.geometry.weight, std=0.1)
 
-    def forward(self, hidden, cells, floats, legal):
+    def forward(self, hidden, inputs):
+        legal = inputs.legal
         rows, tool, cell = legal.rows, self.tool[legal.actions], self.cell[legal.actions]
         batch = hidden.shape[0]
-        blocks = floats[:, ENTITY_START:ENTITY_START + ENTITIES * ENTITY_SIZE]
+        blocks = inputs.floats[:, ENTITY_START:ENTITY_START + ENTITIES * ENTITY_SIZE]
         blocks = blocks.reshape(batch, ENTITIES, ENTITY_SIZE)
         present = blocks[:, :, PRESENT] > 0
         entities = self.entity(blocks)
@@ -174,7 +215,7 @@ class PairHead(nn.Module):
         holder = torch.zeros(batch, MAP_CELLS, dtype=torch.long, device=hidden.device)
         row, slot = present.nonzero(as_tuple=True)
         holder[row, where[row, slot]] = slot + 1
-        target = (self.category(cells[rows, cell].long())
+        target = (self.category(inputs.cells()[rows, cell])
                   + self.place(cell) + self.geometry(self.places)[cell]
                   + entities[rows, holder[rows, cell]])
         wanted = (self.fixed(tool) + self.adapted(tool) * self.weights(hidden)[rows]
@@ -191,10 +232,8 @@ class Policy(nn.Module):
                          "layers": layers}
         # A vector per (cell, category) for obstacles and entities, and one per position
         # on the map: together they say as much as the whole map.
-        self.map = nn.EmbeddingBag(MAP_CELLS * (CATEGORIES - FREE - 1), branch, mode="sum")
-        self.position = nn.Embedding((MAP_RADIUS + 1) ** 2, branch)
-        x, y = relative_cells()
-        self.register_buffer("offsets", torch.stack([x, y], 1), persistent=False)
+        self.map = nn.EmbeddingBag(MAP_CELLS * HELD, branch, mode="sum")
+        self.position = nn.Embedding(PLACES, branch)
         self.floats = nn.Linear(floats, branch)
         # A vector per action, summed over the legal ones.
         self.mask = nn.EmbeddingBag(actions, branch, mode="sum") if mask_input else None
@@ -217,28 +256,15 @@ class Policy(nn.Module):
         nn.init.orthogonal_(self.value.weight, gain=1)
         nn.init.zeros_(self.value.bias)
 
-    def place(self, cells):
-        """Index of the acting entity's position, from the center of the map seen by it."""
-        # The map is symmetric: its center is the mean of its cells.
-        center = ((cells != 0).float() @ self.offsets / REAL_CELLS).round().long()
-        half = MAP_RADIUS // 2
-        return (center[:, 1] + half) * (MAP_RADIUS + 1) + center[:, 0] + half
-
-    def _trunk(self, cells, floats, legal):
-        held = cells > FREE
-        rows, columns = held.nonzero(as_tuple=True)
-        indices = columns * (CATEGORIES - FREE - 1) + cells[rows, columns].long() - FREE - 1
-        counts = torch.bincount(rows, minlength=cells.shape[0])
-        offsets = torch.cat([counts.new_zeros(1), counts.cumsum(0)[:-1]])
-        parts = [self.map(indices, offsets) + self.position(self.place(cells)),
-                 self.floats(floats)]
+    def _trunk(self, inputs):
+        parts = [self.map(inputs.held, inputs.held_offsets) + self.position(inputs.place),
+                 self.floats(inputs.floats)]
         if self.mask is not None:
-            parts.append(self.mask(legal.actions, legal.offsets))
+            parts.append(self.mask(inputs.legal.actions, inputs.legal.offsets))
         return self.trunk(torch.cat(parts, 1))
 
-    def forward(self, cells, floats, mask):
-        """cells: uint8 categories; floats; mask: bool. Returns distribution and value."""
-        legal = Legal(mask)
-        hidden = self._trunk(cells, floats, legal)
-        logits = self.policy(hidden, cells, floats, legal)
-        return Distribution(logits, legal), self.value(hidden).squeeze(1)
+    def forward(self, inputs):
+        """Returns distribution and value."""
+        hidden = self._trunk(inputs)
+        logits = self.policy(hidden, inputs)
+        return Distribution(logits, inputs.legal), self.value(hidden).squeeze(1)

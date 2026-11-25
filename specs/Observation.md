@@ -18,14 +18,24 @@ whose turn it is. "Ally" and "enemy" are relative to its team.
 | Uses left | float | 46 | Limited items of the acting entity |
 | **Total** | | **2,705 floats + 2,381 bytes** | |
 
-The action mask (10,566 actions) is provided separately, as bits or bytes. The network
-takes it as an input by default, so the agent sees what it can reach and target. An
-experiment without it will tell how much it helps.
+The legal actions, among 10,566, are provided separately. The network takes them as an
+input by default, so the agent sees what it can reach and target. An experiment without
+them will tell how much it helps.
 
-Memory: about 13 KB per decision, plus 1.3 KB for the mask stored as bits.
+What is mostly empty is given as lists: the cells of the map that are not free (about 130)
+and the legal actions (about 50). Memory: about 11 KB per decision.
 
 Scaling divides by a fixed number, chosen so usual values fall within about -1 to 1.
 Values are not clipped unless stated.
+
+## Turned to face the enemy
+
+By default, everything that has a direction is turned so that the enemy leek is always at
+`0 <= dy <= dx`: positions of entities, map, legal actions, and the action chosen. Among
+the 8 symmetries of the grid (quarter turns and reflections, see
+[symmetry.h](../include/leekrl/symmetry.h)), it is the one that does so for the acting
+entity. The rules do not depend on directions, and every action keeps its counterpart:
+nothing is lost. See [adr/observation.md](../adr/observation.md).
 
 ## Map
 
@@ -44,8 +54,11 @@ whole map is always visible. The acting entity is always at index 1190.
 | 6 | Enemy leek |
 | 7 | Enemy summon, plants included |
 
-"Ally leek" only appears when a summon is acting. The map is translated, never
-rotated or mirrored.
+"Ally leek" only appears when a summon is acting. The map is translated, then turned.
+
+The network gets the same thing in another form: for each cell that is not free, its index
+x 6 + its category - 2, in no particular order; and the position of the map's center,
+`(dy + 17) x 35 + dx + 17`, which says which cells are outside.
 
 ## Global (3 floats)
 

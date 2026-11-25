@@ -19,50 +19,68 @@ TRIMS = ("nothing", "useless", "harmful")
 WAIT = -1
 
 
+def sizes():
+    """Numbers of actions, and of floats of an observation."""
+    result = [ctypes.c_size_t() for _ in range(2)]
+    if not library().leekrl_vec_sizes(*map(ctypes.byref, result)):
+        raise RuntimeError("cannot compute the sizes of the environment")
+    return tuple(size.value for size in result)
+
+
 def action_table():
     """What each action is: array (actions, 4) of kind, item, dx, dy.
 
     Kinds are END_TURN, MOVE, WEAPON and CHIP, from 0 to 3. The item is its position
     among the weapons, or the chips, of the observation. dx and dy are relative.
     """
-    sizes = [ctypes.c_size_t() for _ in range(3)]
-    lib = library()
-    if not lib.leekrl_vec_sizes(*map(ctypes.byref, sizes)):
-        raise RuntimeError("cannot compute the sizes of the environment")
-    table = np.zeros((sizes[0].value, 4), np.int32)
-    if not lib.leekrl_vec_action_table(table.ctypes.data_as(
+    table = np.zeros((sizes()[0], 4), np.int32)
+    if not library().leekrl_vec_action_table(table.ctypes.data_as(
             ctypes.POINTER(ctypes.c_int32))):
         raise RuntimeError("cannot describe the actions")
     return table
 
 
+def take(values, counts, rows):
+    """The lists of some rows, from the lists of all of them, one after the other."""
+    counts = counts.astype(np.int64)
+    ends = counts.cumsum()
+    chosen = counts[rows]
+    starts = (ends - counts)[rows] - (chosen.cumsum() - chosen)
+    return values[np.repeat(starts, chosen) + np.arange(chosen.sum())], chosen
+
+
 class VecEnv:
     """Outputs are arrays overwritten by each step, without any copy:
 
-    floats       (n, floats)  float32
-    map          (n, 2381)    uint8, cell categories
-    mask         (n, bytes)   uint8, one bit per action, least significant first
-    rewards      (n, 6)       float32, parts of the previous decision's reward
-    team         (n,)         uint8, team that decides
-    first        (n,)         uint8, first decision of that team in this fight
-    done         (n,)         uint8, a fight ended and was replaced
-    end_rewards  (n, 2, 6)    float32, per team, where done
-    episode      (n, 11)      float32, see EPISODE_FIELDS, where done
+    floats        (n, floats)  float32
+    legal_counts  (n,)         int32, legal actions of each environment
+    held_counts   (n,)         int32, cells that are not free
+    place         (n,)         int16, where the map is
+    symmetry      (n,)         uint8, how the world is turned
+    map           (n, 2381)    uint8, cell categories, if dense_map
+    rewards       (n, 6)       float32, parts of the previous decision's reward
+    team          (n,)         uint8, team that decides
+    first         (n,)         uint8, first decision of that team in this fight
+    done          (n,)         uint8, a fight ended and was replaced
+    end_rewards   (n, 2, 6)    float32, per team, where done
+    episode       (n, 11)      float32, see EPISODE_FIELDS, where done
+
+    legal_actions and held hold the lists of all the environments, one after the other:
+    actions in order, and cell x 6 + category - 2.
+
+    allocate makes the arrays: pinned memory is sent faster to a GPU.
     """
 
     def __init__(self, envs, threads=None, seed=0, known_builds=(), known_probability=None,
-                 skip_forced=None, trim=None, skew=None, stat_weights=None,
-                 rewards=None):
+                 skip_forced=None, trim=None, face_enemy=None, repeat_moves=None, skew=None,
+                 stat_weights=None, rewards=None, dense_map=False, allocate=np.zeros):
         self._lib = library()
         self._vec = None
         layout = self._lib.layout
         if (layout.reward_parts, layout.episode_size) != (len(REWARD_PARTS),
                                                           len(EPISODE_FIELDS)):
             raise RuntimeError("the C library does not match this Python code: rebuild it")
-        sizes = [ctypes.c_size_t() for _ in range(3)]
-        if not self._lib.leekrl_vec_sizes(*map(ctypes.byref, sizes)):
-            raise RuntimeError("cannot compute the sizes of the environment")
-        self.actions, self.float_count, self.mask_bytes = (size.value for size in sizes)
+        self.actions, self.float_count = sizes()
         self.map_cells = layout.map_cells
         self.envs = envs
 
@@ -71,14 +89,15 @@ class VecEnv:
         options.envs = envs
         options.threads = threads or max(1, (os.cpu_count() or 1) // 2)
         options.seed = seed
-        if known_probability is not None:
-            options.known_probability = known_probability
-        if skip_forced is not None:
-            options.skip_forced = skip_forced
         if trim is not None:
             if trim not in TRIMS:
                 raise ValueError(f"trim must be one of {', '.join(TRIMS)}, not {trim!r}")
             options.trim = TRIMS.index(trim)
+        for name, value in (("known_probability", known_probability),
+                            ("skip_forced", skip_forced), ("face_enemy", face_enemy),
+                            ("repeat_moves", repeat_moves)):
+            if value is not None:
+                setattr(options, name, value)
         if skew is not None:
             options.builds.skew = skew
         for stat, weight in (stat_weights or {}).items():
@@ -90,9 +109,14 @@ class VecEnv:
         self.threads = options.threads
 
         parts = layout.reward_parts
-        self.floats = np.zeros((envs, self.float_count), np.float32)
-        self.map = np.zeros((envs, self.map_cells), np.uint8)
-        self.mask = np.zeros((envs, self.mask_bytes), np.uint8)
+        self.floats = allocate((envs, self.float_count), np.float32)
+        self._legal = allocate(envs * self.actions, np.int16)
+        self._held = allocate(envs * layout.max_held, np.int16)
+        self.legal_counts = np.zeros(envs, np.int32)
+        self.held_counts = np.zeros(envs, np.int32)
+        self.place = np.zeros(envs, np.int16)
+        self.symmetry = np.zeros(envs, np.uint8)
+        self.map = np.zeros((envs, self.map_cells), np.uint8) if dense_map else None
         self.rewards = np.zeros((envs, parts), np.float32)
         self.team = np.zeros(envs, np.uint8)
         self.first = np.zeros(envs, np.uint8)
@@ -101,7 +125,9 @@ class VecEnv:
         self.episode = np.zeros((envs, layout.episode_size), np.float32)
         buffers = VecBuffers()
         for name, kind in VecBuffers._fields_:
-            setattr(buffers, name, getattr(self, name).ctypes.data_as(kind))
+            array = getattr(self, {"legal": "_legal", "held": "_held"}.get(name, name))
+            if array is not None:
+                setattr(buffers, name, array.ctypes.data_as(kind))
 
         error = ctypes.create_string_buffer(256)
         self._vec = self._lib.leekrl_vec_create(ctypes.byref(options), ctypes.byref(buffers),
@@ -138,10 +164,19 @@ class VecEnv:
         self._check(self._lib.leekrl_vec_step(
             self._vec, actions.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))))
 
+    @property
+    def legal_actions(self):
+        return self._legal[:self.legal_counts.sum()]
+
+    @property
+    def held(self):
+        return self._held[:self.held_counts.sum()]
+
     def legal(self):
-        """The masks as booleans, (n, actions). A copy."""
-        return np.unpackbits(self.mask, axis=1, count=self.actions,
-                             bitorder="little").astype(bool)
+        """The legal actions as booleans, (n, actions). A copy."""
+        result = np.zeros((self.envs, self.actions), bool)
+        result[np.repeat(np.arange(self.envs), self.legal_counts), self.legal_actions] = True
+        return result
 
     @property
     def data_hash(self):

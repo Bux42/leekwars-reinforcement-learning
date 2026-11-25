@@ -77,7 +77,8 @@ td.n { text-align: right; font-variant-numeric: tabular-nums; }
     <p class="legend" id="legend"></p>
     <p class="legend">Letters: L leek, others are summons. ◎ acting entity, thick outline: chosen target.
       Blue and orange are the acting entity's allies and enemies, so they swap when the team changes.
-      Keys: ← → one decision, ↑ ↓ one turn.</p>
+      As the network sees it, the world is turned so that the enemy leek is always between the
+      bottom and the bottom right. Keys: ← → one decision, ↑ ↓ one turn.</p>
   </section>
   <section>
     <div class="row" role="tablist" id="tabs"></div>
@@ -99,6 +100,7 @@ const act = a => ({kind: D.table[4 * a], item: D.table[4 * a + 1], dx: D.table[4
 const tool = a => a.kind === 0 ? "end turn" : a.kind === 1 ? "move" : a.kind === 2 ? D.weapons[a.item] : D.chips[a.item];
 const index = (x, y) => (y <= 0 ? (y + R) ** 2 : 2381 - (R - y + 1) ** 2) + x + R - Math.abs(y);
 const kindAt = (s, x, y) => +s.map[index(x, y)];
+const turned = (k, x, y) => { x = k & 2 ? -x : x; y = k & 1 ? -y : y; return k & 4 ? [y, x] : [x, y]; };
 function describe(s, n) {
   const a = act(n);
   if (!a.kind) return "end turn";
@@ -118,7 +120,10 @@ function board() {
   const s = S(), chosen = act(s.chosen), c = centered ? [0, 0] : center(s);
   const half = centered ? 35 : 18;
   // East on screen is dx - dy, south is dx + dy, as in the game.
-  const px = (x, y) => [((x - c[0]) - (y - c[1])) * 10, ((x - c[0]) + (y - c[1])) * 10];
+  const px = (x, y) => {
+    if (centered) [x, y] = turned(s.symmetry || 0, x, y);
+    return [((x - c[0]) - (y - c[1])) * 10, ((x - c[0]) + (y - c[1])) * 10];
+  };
   const heat = new Map(), want = $("overlay").value;
   s.actions.forEach((n, i) => {
     const a = act(n);

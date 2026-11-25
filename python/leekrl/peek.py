@@ -3,7 +3,8 @@
     python -m leekrl.peek --checkpoint runs/first-run/checkpoint_000100.pt --fights 3
 
 Everything shown about the world is decoded from the inputs of the network, and from
-nothing else: what is missing from the page is missing for the agent.
+nothing else: what is missing from the page is missing for the agent. It is only turned
+back, to show the fight on a map that does not turn.
 """
 
 import argparse
@@ -17,6 +18,7 @@ import torch
 from .builds import load_known_builds
 from .model import Policy
 from .native import ROOT, library
+from .symmetry import turn_back, turned_actions, turned_cells
 from .vec import EPISODE_FIELDS, REWARD_PARTS, TRIMS, VecEnv, action_table
 
 TEMPLATE = Path(__file__).with_name("peek.html")
@@ -94,8 +96,8 @@ def turns(value):
     return "permanent" if value > 0.95 else "9+" if value > 0.89 else round(float(value) * 10)
 
 
-def decode(floats, names):
-    """The observation's floats in readable units."""
+def decode(floats, names, symmetry=0):
+    """The observation's floats in readable units, turned back."""
     entities = []
     for i in range(ENTITIES):
         b = floats[3 + i * ENTITY:3 + (i + 1) * ENTITY]
@@ -103,10 +105,11 @@ def decode(floats, names):
             continue
         kind = int(np.argmax(b[2:16]))
         total = float(np.expm1(b[17] * 10))
+        dx, dy = turn_back(symmetry, round(float(b[18]) * 34), round(float(b[19]) * 34))
         entity = {
             "type": names["types"][kind], "ally": bool(b[1]), "summon": kind > 0,
             "life": round(float(b[16]) * total), "total_life": round(total),
-            "dx": round(float(b[18]) * 34), "dy": round(float(b[19]) * 34),
+            "dx": int(dx), "dy": int(dy),
             "tp": round(float(b[21]) * 30), "total_tp": round(float(b[22]) * 30),
             "mp": round(float(b[23]) * 15), "total_mp": round(float(b[24]) * 15),
             "stats": {name: round(float(b[25 + k]) * scale)
@@ -141,21 +144,24 @@ def decode(floats, names):
 
 def record(model, fights, seed, known=(), opponent="self", max_decisions=3000, **settings):
     """Play fights, keeping every decision. opponent: self, random or idle (team 1)."""
-    names = item_names()
+    from .train import inputs
+    names, cells_of = item_names(), turned_cells()
+    actions_of = turned_actions().argsort(1)        # the other way round
     result = []
     generator = torch.Generator().manual_seed(seed)
     for number in range(fights):
-        with VecEnv(1, threads=1, seed=seed + number, known_builds=known, **settings) as env:
+        with VecEnv(1, threads=1, seed=seed + number, known_builds=known, dense_map=True,
+                    **settings) as env:
             env.reset()
             decisions, last = [], [None, None]
             while len(decisions) < max_decisions:
                 team = int(env.team[0])
-                floats, cells = env.floats[0].copy(), env.map[0].copy()
-                mask = torch.from_numpy(env.legal())
+                floats, symmetry = env.floats[0].copy(), int(env.symmetry[0])
+                cells = env.map[0][cells_of[symmetry]]
+                actions = env.legal_actions.copy()
+                shown = actions_of[symmetry][actions]
                 with torch.no_grad():
-                    distribution, value = model(torch.from_numpy(cells[None]),
-                                                torch.from_numpy(floats[None]), mask)
-                    actions = distribution.legal.actions
+                    distribution, value = model(inputs(env, "cpu"))
                     if opponent == "idle" and team == 1:
                         position = 0
                     elif opponent == "random" and team == 1:
@@ -169,13 +175,14 @@ def record(model, fights, seed, known=(), opponent="self", max_decisions=3000, *
                     "team": team, "value": round(float(value[0]), 4),
                     "entropy": round(float(distribution.entropy()[0]), 3),
                     "scripted": opponent != "self" and team == 1,
+                    "symmetry": symmetry,
                     "map": "".join(map(str, cells)),
-                    "seen": decode(floats, names),
+                    "seen": decode(floats, names, symmetry),
                     "raw": [[int(k), round(float(floats[k]), 4)]
                             for k in np.flatnonzero(floats)],
-                    "actions": actions.tolist(),
+                    "actions": shown.tolist(),
                     "probs": [round(float(p), 5) for p in distribution.probs],
-                    "chosen": int(actions[position])})
+                    "chosen": int(shown[position])})
                 env.step(np.array([int(actions[position])]))
                 if env.done[0]:
                     break
@@ -215,21 +222,22 @@ def main():
     parser.add_argument("--out", help="runs/peek.html, or next to the checkpoint")
     options = parser.parse_args()
     if options.checkpoint:
-        from .train import load_policy
+        from .train import load_policy, world
         model, data = load_policy(options.checkpoint)
         title = f"{data['config']['name']}, update {data['update']}"
-        # Runs that do not say only masked useless casts.
-        trim = options.trim or data["config"].get("trim", "useless")
+        settings = world(data["config"])
         out = options.out or Path(options.checkpoint).with_suffix(".html")
     else:
         torch.manual_seed(options.seed)
         with VecEnv(1) as env:
             model = Policy(env.actions, env.float_count)
         title, out = "untrained network", options.out or ROOT / "runs" / "peek.html"
-        trim = options.trim
+        settings = {}
+    settings["known_probability"] = options.known_probability
+    if options.trim:
+        settings["trim"] = options.trim
     fights = record(model, options.fights, options.seed, load_known_builds(),
-                    options.opponent, known_probability=options.known_probability,
-                    trim=trim)
+                    options.opponent, **settings)
     print(write(out, fights, f"{title}, against {options.opponent}"))
 
 
