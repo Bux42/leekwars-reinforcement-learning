@@ -122,11 +122,11 @@ typedef enum {
 
 /*
  * Same as leekrl_action_catalog_mask, without some casts. Every cast is kept for
- * a caster holding a weapon that reacts to its critical hits.
+ * a caster that its critical hits would heal.
  *
- * Useless: the area holds no entity any of the effects accepts. Kept: casts with
- * an effect on the caster whatever the target (a sword's shield), summons and
- * teleports.
+ * Useless: the area holds no entity any of the effects accepts and can change:
+ * none to heal, to cure, to infect... Kept: casts with an effect on the caster
+ * whatever the target (a sword's shield), summons and teleports.
  *
  * Harmful: every effect either
  * - takes TP, MP or characteristics from its own team, or makes it unhealable;

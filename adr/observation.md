@@ -186,13 +186,28 @@ Date: 2026-11-24. Status: accepted.
 
 A cast whose area holds no entity any of its effects accepts cannot change anything. It is
 masked, except when it affects its caster anyway (a sword's shield), summons or teleports,
-or when the caster holds a weapon that reacts to its critical hits. 518,000 masked casts
+or when the caster's critical hits would heal it (`unstable_destroyer`, with life missing, not
+unhealable and some agility). 518,000 masked casts
 were executed on cloned fights, none had an effect. 84% of legal casts are masked.
 
 What `j_laser` and `quantum_rifle` steal for their caster depends on who they reach: they
 are masked too when they reach nobody.
 
-Casts that reach someone but achieve nothing (healing a leek at full life) are kept.
+Masked too when it reaches someone, but nobody it can change:
+
+| Effect | Nothing to change when |
+|---|---|
+| Instant heal | no life is missing, or the target is unhealable. Heals over time are kept |
+| Loss of maximum life: `alteration`, `desintegration` | the target is at full life: at most the life missing is taken |
+| `superinfection` | it carries no poison |
+| `antidote` | it carries no poison, and lacks no life |
+| `liberation` | it carries no effect, or only irreducible ones |
+| `covid` | it already carries it |
+
+Found by executing the kept casts on clones, 8 times each with other random numbers: 2.4% never
+changed anything, before the last five were masked. What remains is damage that shields absorb,
+and values that round down to 0 (`rage`, `soporific`...). Both depend on characteristics and
+rolls, the agent can learn them.
 
 ## Harmful casts are masked
 
@@ -205,14 +220,14 @@ anything else to offer stays, like a `tranquilizer` that reaches an ally and an 
 | Masked | Items |
 |---|---|
 | It only reaches its team, and only takes TP, MP or characteristics from it, or makes it unhealable | `tranquilizer`, `soporific`, `slow_down`, `ball_and_chain`, `fracture`, `crushing`, `brainwashing`, `hemorrhage`, `plutonium_bazooka` |
-| It only reaches enemies, and only gives them life, maximum life, TP or characteristics, or removes their shackles | `bandage`, `cure`, `drip`, `therapy`, `regeneration`, `explorer_rifle`, `armoring`, `elevation`, `mutation`, `transmutation`, `knowledge`, `prism`, `wizardry`, `manumission` |
+| It only reaches enemies (for an instant heal, those that lack life), and only gives them life, maximum life, TP or characteristics, or removes their shackles | `bandage`, `cure`, `drip`, `therapy`, `regeneration`, `explorer_rifle`, `armoring`, `elevation`, `mutation`, `transmutation`, `knowledge`, `prism`, `wizardry`, `manumission` |
 | It only harms its caster, a leek | `shock`, `pebble`, `ice`, `spark`, `flash`, `devil_strike`, `plasma`, `toxin`, `plague`, `gazor`, `desintegration` on itself; `punishment`, `dark_katana` on an empty cell |
 
 Such a cast can still be a strategy. It is kept in these cases:
 
 | Kept | Why |
 |---|---|
-| The caster has `unstable_destroyer` | Its critical hits heal it, whatever it casts |
+| The caster has `unstable_destroyer`, lacks life, is not unhealable and has agility | Its critical hits heal it, whatever it casts |
 | The target already has the effect of the same item, and it does not stack: `tranquilizer`, `hemorrhage`, `knowledge`, `prism`, `wizardry` | The new effect replaces it, even that of the other team: a weak `tranquilizer` on oneself removes a strong one |
 | Damage to a leek with `revoked_m_laser`, `plutonium_bazooka`, `mysterious_electrisor` or `unbridled_gazor` | It gives strength, resistance, a shield or magic |
 | Poison on a leek with `illicit_grenade_launcher` or `unbridled_gazor` | It gives science or magic |

@@ -74,7 +74,8 @@ enum {
     PUNISHMENT = 114, WIZARD_BULB = 142, PLASMA = 143, COVID = 152, ELEVATION = 154,
     KNOWLEDGE = 155, WIZARDRY = 156, THERAPY = 158, MUTATION = 159, DESINTEGRATION = 160,
     TRANSMUTATION = 161, CRUSHING = 169, BRAINWASHING = 170, BRAMBLE = 172,
-    MANUMISSION = 174, HEMORRHAGE = 273, PRISM = 276, SUPERINFECTION = 443
+    MANUMISSION = 174, HEMORRHAGE = 273, PRISM = 276, SUPERINFECTION = 443,
+    LIBERATION = 34, ANTIDOTE = 110, ALTERATION = 141
 };
 
 /* Why an item is on the list. */
@@ -138,6 +139,13 @@ static int special(int item)
            why == POISONS || why == ERODES;
 }
 
+/* Useless on some of the entities they reach: always tried, they are rare. */
+static int conditional(int item)
+{
+    return item == ALTERATION || item == DESINTEGRATION || item == SUPERINFECTION ||
+           item == ANTIDOTE || item == LIBERATION || item == COVID;
+}
+
 static int holds(LwEntity *entity, int weapon) { return lw_entity_has_weapon(entity, weapon); }
 
 static int legal_item(const leekrl_action *action, LwAttack **attack)
@@ -170,6 +178,18 @@ static void reach(session *s, LwEntity *actor, const leekrl_action *action, reac
     }
 }
 
+static int lacks_life(const LwEntity *entity)
+{
+    return lw_entity_get_life(entity) < lw_entity_get_total_life(entity) &&
+           !lw_entity_has_state(entity, LW_ENTITY_STATE_UNHEALABLE);
+}
+
+static int only_heals(int item)
+{
+    return item == BANDAGE || item == CURE || item == DRIP || item == THERAPY ||
+           item == REGENERATION || item == EXPLORER_RIFLE;
+}
+
 /* Whether a cast is on the list, and which exception keeps it. */
 static int on_the_list(session *s, LwEntity *actor, const leekrl_action *action,
                        exception *kept)
@@ -180,6 +200,18 @@ static int on_the_list(session *s, LwEntity *actor, const leekrl_action *action,
     *kept = NO_EXCEPTION;
     if (why == NOT_LISTED) return 0;
     reach(s, actor, action, &r);
+    /* Those a heal, or a loss of maximum life, does nothing to do not count. */
+    if (only_heals(action->item_id) || why == ERODES) {
+        r.caster = r.allies = r.enemies = 0;
+        for (i = 0; i < r.n; ++i) {
+            if (why == ERODES ? lw_entity_get_life(r.entities[i]) ==
+                                lw_entity_get_total_life(r.entities[i])
+                              : !lacks_life(r.entities[i])) continue;
+            if (r.entities[i] == actor) r.caster = 1;
+            else if (lw_entity_get_team(r.entities[i]) == lw_entity_get_team(actor)) ++r.allies;
+            else ++r.enemies;
+        }
+    }
     switch (why) {
     case DAMAGES: case POISONS: case ERODES:
         harmful = r.caster && !r.allies && !r.enemies;
@@ -197,7 +229,8 @@ static int on_the_list(session *s, LwEntity *actor, const leekrl_action *action,
         break;
     }
     if (!harmful) return 0;
-    if (holds(actor, UNSTABLE_DESTROYER)) {
+    if (holds(actor, UNSTABLE_DESTROYER) && lw_entity_get_agility(actor) > 0 &&
+        lacks_life(actor)) {
         *kept = CRITICAL_HITS;
     } else if (why == WEAKENS || why == HELPS) {
         for (i = 0; i < r.n && replaces(action->item_id); ++i)
@@ -390,7 +423,7 @@ static const int hurting[] = {
     SHOCK, PEBBLE, ICE, SPARK, FLASH, DEVIL_STRIKE, PLASMA, TOXIN, PLAGUE, DESINTEGRATION,
     PUNISHMENT, TRANQUILIZER, SOPORIFIC, SLOW_DOWN, BALL_AND_CHAIN, FRACTURE, CRUSHING,
     BRAINWASHING, HEMORRHAGE, COVID, SUPERINFECTION, FIRE_BULB, ICED_BULB, LIGHTNING_BULB,
-    WIZARD_BULB, PUNY_BULB
+    WIZARD_BULB, PUNY_BULB, ANTIDOTE, LIBERATION, ALTERATION
 };
 static const int helping[] = {
     BANDAGE, CURE, DRIP, THERAPY, REGENERATION, ARMORING, ELEVATION, MUTATION, TRANSMUTATION,
@@ -435,6 +468,7 @@ int main(int argc, char **argv)
     long harmful = 0, followed = 0, turns = 0, empty_kept = 0, by_reason[HELPS + 1] = {0};
     long excepted[EXCEPTIONS] = {0}, followed_excepted[EXCEPTIONS] = {0}, helped[EXCEPTIONS] = {0};
     long covid_itself = 0, bramble_enemy = 0, superinfection_own = 0, own_summons = 0, steals = 0;
+    long heals = 0, idle_crits = 0, idle[5] = {0};
     if (!leekrl_item_snapshot_register(error, sizeof(error))) {
         fprintf(stderr, "item registration: %s\n", error);
         return 1;
@@ -501,11 +535,24 @@ int main(int argc, char **argv)
                     kept += mask[k];
                     trimmed += !useful[k];
                     if (!useful[k]) {
-                        if (next_random(&rng) % 60) continue;
+                        r.n = 0;
+                        if (conditional(action->item_id)) reach(s, actor, action, &r);
+                        if (!r.n && next_random(&rng) % 60) continue;
                         ++tried;
                         reach(s, actor, action, &r);
                         steals += !r.n && (action->item_id == J_LASER ||
                                            action->item_id == QUANTUM_RIFLE);
+                        heals += r.n && (action->item_id == BANDAGE || action->item_id == CURE ||
+                                         action->item_id == REGENERATION);
+                        idle_crits += holds(actor, UNSTABLE_DESTROYER);
+                        if (r.n) {
+                            idle[0] += action->item_id == ALTERATION ||
+                                       action->item_id == DESINTEGRATION;
+                            idle[1] += action->item_id == SUPERINFECTION;
+                            idle[2] += action->item_id == ANTIDOTE;
+                            idle[3] += action->item_id == LIBERATION;
+                            idle[4] += action->item_id == COVID;
+                        }
                         if (changes(s, actor, action)) {
                             fprintf(stderr, "seed %d: trimmed cast of item %d at (%d, %d) is "
                                     "not useless\n", current_seed, action->item_id,
@@ -575,7 +622,10 @@ int main(int argc, char **argv)
     printf("%ld decisions, %ld legal casts: %.1f%% useless, %.1f%% harmful, %.1f%% kept\n",
            decisions, casts, 100.0 * (double)trimmed / (double)casts,
            100.0 * (double)harmful / (double)casts, 100.0 * (double)kept / (double)casts);
-    printf("%ld useless casts tried, without effect (%ld steals reaching nobody)\n", tried, steals);
+    printf("%ld useless casts tried, without effect (%ld steals reaching nobody, %ld heals, %ld "
+           "with a weapon healing on critical hits, %ld maximum life taken at full life, %ld "
+           "superinfections, %ld antidotes, %ld liberations, %ld covids)\n", tried, steals, heals,
+           idle_crits, idle[0], idle[1], idle[2], idle[3], idle[4]);
     printf("%ld harmful casts followed for %.1f turns, that never helped\n", followed,
            (double)turns / (double)followed);
     printf("harmful: %ld damage the caster, %ld poison it, %ld take its maximum life, %ld only "
@@ -594,7 +644,8 @@ int main(int argc, char **argv)
     CHECK(effective > kept_tried / 3);
     for (i = DAMAGES; i <= HELPS; ++i) CHECK(by_reason[i]);
     for (i = 1; i < EXCEPTIONS; ++i) CHECK(excepted[i]);
-    CHECK(steals && covid_itself && bramble_enemy && superinfection_own && own_summons);
+    CHECK(idle[0] && idle[1] && idle[2] && idle[3] && idle[4]);
+    CHECK(steals && heals && idle_crits && covid_itself && bramble_enemy && superinfection_own && own_summons);
     CHECK(helped[FED_DAMAGE] && helped[FED_POISON] && helped[FED_EROSION] && helped[REPLACED]);
     CHECK(leekrl_action_catalog_trimmed_mask(catalog, &s->fight, NULL, LEEKRL_TRIM_HARMFUL,
                                              mask) == LEEKRL_ACTION_INVALID_ARGUMENT);

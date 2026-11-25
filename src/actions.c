@@ -530,7 +530,15 @@ typedef struct {
     int kills;         /* someone is rewarded for kills */
     int propagation;   /* someone carries a poison that propagates */
     int summon;        /* the caster is one */
+    int healable;      /* the caster would receive a heal */
 } circumstances;
+
+/* Whether a heal would give it anything now. */
+static int healable(const LwEntity *entity)
+{
+    return lw_entity_get_life(entity) < lw_entity_get_total_life(entity) &&
+           !lw_entity_has_state(entity, LW_ENTITY_STATE_UNHEALABLE);
+}
 
 /* Entities an effect can be worth reaching. */
 enum { ON_CASTER = 1, ON_ALLIES = 2, ON_ENEMIES = 4, ON_ANYONE = 7 };
@@ -540,12 +548,16 @@ typedef struct {
     int targets;  /* those the engine accepts */
     int worth;    /* ON_... */
     int replaces; /* removes the same effect of the same item from its target */
+    int heals;    /* gives life at once, and nothing else */
+    int on_caster;
+    int kept_out; /* by the same item's effects its target already has */
 } effect_use;
 
 /* What a cast needs to be kept. */
 typedef struct {
     int always;     /* whatever is reached */
     int any_entity; /* an entity of any kind is enough */
+    int caster_healable;
     int item;
     int n_effects;
     effect_use effects[LW_ATTACK_MAX_EFFECTS];
@@ -612,12 +624,15 @@ static void examine(const LwAttack *attack, leekrl_trim trim, const circumstance
     int i;
     use->always = use->any_entity = use->n_effects = 0;
     use->item = lw_attack_get_item_id(attack);
+    use->caster_healable = now->healable;
     for (i = 0; i < lw_attack_get_effects_count(attack); ++i) {
         const LwEffectParameters *effect = &attack->effects[i], *reached = effect;
         int id = lw_effect_parameters_get_id(effect);
         int modifiers = lw_effect_parameters_get_modifiers(effect);
         int worth = trim >= LEEKRL_TRIM_HARMFUL
             ? worth_reaching(attack, effect, now) : ON_ANYONE;
+        int heals = (id == LW_EFFECT_TYPE_HEAL || id == LW_EFFECT_TYPE_RAW_HEAL) &&
+            lw_effect_parameters_get_turns(effect) == 0;
         effect_use *added;
         switch (id) {
         case LW_EFFECT_TYPE_SUMMON:
@@ -643,7 +658,7 @@ static void examine(const LwAttack *attack, leekrl_trim trim, const circumstance
             if (!(modifiers & LW_MODIFIER_ON_CASTER)) break;
             if (modifiers & LW_MODIFIER_MULTIPLIED_BY_TARGETS) {
                 worth = ON_ANYONE; /* each target counts for the caster */
-            } else if (worth & ON_CASTER) {
+            } else if ((worth & ON_CASTER) && (!heals || now->healable)) {
                 use->always = 1;
                 return;
             } else {
@@ -654,6 +669,9 @@ static void examine(const LwAttack *attack, leekrl_trim trim, const circumstance
         added->id = id;
         added->targets = lw_effect_parameters_get_targets(reached);
         added->worth = worth;
+        added->heals = heals;
+        added->on_caster = (modifiers & LW_MODIFIER_ON_CASTER) != 0;
+        added->kept_out = (modifiers & LW_MODIFIER_NOT_REPLACEABLE) != 0;
         added->replaces = lw_effect_parameters_get_turns(effect) != 0 &&
             (!(modifiers & LW_MODIFIER_STACKABLE) || id == LW_EFFECT_TYPE_ADD_STATE);
     }
@@ -671,6 +689,45 @@ static int has_effect(const LwEntity *entity, int id, int item)
     return 0;
 }
 
+static int has_poison(const LwEntity *entity, int permanent_too)
+{
+    int i;
+    for (i = 0; i < lw_entity_get_effects_count(entity); ++i) {
+        const LwEffect *effect = lw_entity_get_effect_at(entity, i);
+        if (lw_effect_get_id(effect) == LW_EFFECT_TYPE_POISON &&
+            (permanent_too || lw_effect_get_turns(effect) != -1)) return 1;
+    }
+    return 0;
+}
+
+static int has_reducible_effect(const LwEntity *entity)
+{
+    int i;
+    for (i = 0; i < lw_entity_get_effects_count(entity); ++i)
+        if (!(lw_effect_get_modifiers(lw_entity_get_effect_at(entity, i)) &
+              LW_MODIFIER_IRREDUCTIBLE)) return 1;
+    return 0;
+}
+
+/* Whether an effect can change anything on an entity the engine accepts. */
+static int receives(const usefulness *use, const effect_use *effect, const LwEntity *entity)
+{
+    if (effect->heals) return effect->on_caster ? use->caster_healable : healable(entity);
+    if (effect->kept_out && lw_entity_has_effect(entity, use->item)) return 0;
+    switch (effect->id) {
+    case LW_EFFECT_TYPE_NOVA_DAMAGE: /* at most the life missing */
+        return lw_entity_get_life(entity) != lw_entity_get_total_life(entity);
+    case LW_EFFECT_TYPE_SUPERINFECTION:
+        return has_poison(entity, 0);
+    case LW_EFFECT_TYPE_ANTIDOTE:
+        return has_poison(entity, 1);
+    case LW_EFFECT_TYPE_DEBUFF:
+        return has_reducible_effect(entity);
+    default:
+        return 1;
+    }
+}
+
 static int accepts(const usefulness *use, LwEntity *actor, LwEntity *entity)
 {
     int side = entity == actor ? ON_CASTER
@@ -679,9 +736,10 @@ static int accepts(const usefulness *use, LwEntity *actor, LwEntity *entity)
     if (use->any_entity) return 1;
     for (i = 0; i < use->n_effects; ++i) {
         const effect_use *effect = &use->effects[i];
-        if (lw_attack_filter_target(effect->targets, actor, entity) &&
-            ((effect->worth & side) ||
-             (effect->replaces && has_effect(entity, effect->id, use->item)))) return 1;
+        if (!lw_attack_filter_target(effect->targets, actor, entity) ||
+            !receives(use, effect, entity)) continue;
+        if ((effect->worth & side) ||
+            (effect->replaces && has_effect(entity, effect->id, use->item))) return 1;
     }
     return 0;
 }
@@ -790,6 +848,7 @@ static leekrl_action_status catalog_mask(const leekrl_action_catalog *catalog,
     memset(sight.visible, -1, sizeof(sight.visible));
     now.passives = passive_effects(actor);
     now.summon = lw_entity_is_summon(actor);
+    now.healable = healable(actor);
     for (i = 0; i < state->order.n_leeks; ++i) {
         const LwEntity *entity = state->order.leeks[i];
         int k;
@@ -797,8 +856,10 @@ static leekrl_action_status catalog_mask(const leekrl_action_catalog *catalog,
         for (k = 0; k < lw_entity_get_effects_count(entity); ++k)
             now.propagation |= lw_entity_get_effect_at(entity, k)->propagate > 0;
     }
-    /* Casts of this entity can matter by themselves, through critical hits. */
-    if (now.passives & PASSIVE(CRITICAL_TO_HEAL)) trim = LEEKRL_TRIM_NOTHING;
+    /* Casts of this entity can matter by themselves, through critical hits. The heal comes
+     * before anything else the cast does. */
+    if ((now.passives & PASSIVE(CRITICAL_TO_HEAL)) && now.healable &&
+        lw_entity_get_agility(actor) > 0) trim = LEEKRL_TRIM_NOTHING;
     for (i = 0; i < lw_entity_get_weapons_count(actor); ++i) {
         LwWeapon *weapon = lw_entity_get_weapon_at(actor, i);
         if (!weapon) continue;
