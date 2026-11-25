@@ -171,7 +171,9 @@ static void test_fights(void)
                     const float *end = s.b.end_rewards + (2 * i + (size_t)t) * LEEKRL_REWARD_PARTS;
                     float outcome = winner == -1 ? -0.2f : winner == t ? 1.0f : -1.0f;
                     CHECK(end[LEEKRL_REWARD_OUTCOME] == outcome);
-                    CHECK((end[LEEKRL_REWARD_DURATION] > 0) == (winner == t));
+                    /* Nothing for a win during the last turn. */
+                    CHECK((end[LEEKRL_REWARD_DURATION] > 0) ==
+                          (winner == t && e[LEEKRL_EPISODE_TURNS] < 64));
                     CHECK((end[LEEKRL_REWARD_ACTIONS] > 0) == (winner == t));
                     CHECK(e[LEEKRL_EPISODE_DECISIONS + t] == decisions[i][t]);
                     CHECK(e[LEEKRL_EPISODE_ACTIONS + t] <= decisions[i][t]);
