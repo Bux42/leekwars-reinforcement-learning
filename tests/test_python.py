@@ -190,6 +190,43 @@ class PythonTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "illegal action"):
                 env.step([-2, 0])
 
+    def test_sight(self):
+        """Cells from which the enemy leek is seen: free cells or the actor's own, reachable,
+        and the actor's own when an ordinary cast reaches the enemy leek. The fights are the
+        same with or without them."""
+        from leekrl.vec import action_table
+        table = action_table()
+        moves = {(int(dx), int(dy)) for kind, _, dx, dy in table if kind == 1}
+        index, n = {}, 0
+        for dy in range(-34, 35):
+            for dx in range(-34, 35):
+                if abs(dx) + abs(dy) <= 34:
+                    index[(dx, dy)] = n
+                    n += 1
+        position = {i: p for p, i in index.items()}
+        random = np.random.default_rng(3)
+        own = seen_casts = 0
+        with VecEnv(32, threads=2, seed=8, sight=True, dense_map=True) as env, \
+                VecEnv(32, threads=2, seed=8) as other:
+            self.assertIsNone(other.sight)
+            env.reset()
+            other.reset()
+            for _ in range(150):
+                legal = env.legal()
+                starts = np.cumsum(env.sight_counts) - env.sight_counts
+                for row in range(32):
+                    cells = env.sight[starts[row]:starts[row] + env.sight_counts[row]]
+                    self.assertEqual(len(set(cells.tolist())), len(cells))
+                    for cell in cells:
+                        self.assertIn(env.map[row, cell], (1, 3))        # free, or self
+                        self.assertTrue(position[cell] == (0, 0) or position[cell] in moves)
+                    own += 1190 in cells
+                actions = [int(random.choice(np.flatnonzero(row))) for row in legal]
+                env.step(actions)
+                other.step(actions)
+                np.testing.assert_array_equal(env.floats, other.floats)
+        self.assertGreater(own, 0)
+
     def test_records(self):
         """Recorded fights are the same, and their reports hold every action."""
         random = np.random.default_rng(2)

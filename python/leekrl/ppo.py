@@ -78,9 +78,9 @@ class Rollout:
         self.choices = torch.zeros((steps, n), dtype=torch.long, device=device)
         self.log_probs = torch.zeros((steps, n), device=device)
         self.estimates = torch.zeros((steps, n), device=device)
-        self.lists = {"legal": [None] * steps, "held": [None] * steps}
-        self.sizes = {"legal": torch.zeros((steps, n), dtype=torch.long),
-                      "held": torch.zeros((steps, n), dtype=torch.long)}
+        names = ("legal", "held") + (("sight",) if env.sight is not None else ())
+        self.lists = {name: [None] * steps for name in names}
+        self.sizes = {name: torch.zeros((steps, n), dtype=torch.long) for name in names}
         self.team = np.zeros((steps, n), np.uint8)
         self.first = np.zeros((steps, n), np.uint8)
         self.done = np.zeros((steps, n), np.uint8)
@@ -93,8 +93,9 @@ class Rollout:
         """Keep the pending decisions, and return the inputs of the network."""
         self.floats[t].copy_(torch.from_numpy(env.floats), non_blocking=True)
         self.place[t] = torch.from_numpy(env.place.astype(np.int64)).to(self.device)
-        for name, values, sizes in (("legal", env.legal_actions, env.legal_counts),
-                                    ("held", env.held, env.held_counts)):
+        for name in self.lists:
+            values = env.legal_actions if name == "legal" else getattr(env, name)
+            sizes = getattr(env, name + "_counts")
             # A copy, even on the CPU: the environment writes there again.
             self.lists[name][t] = torch.from_numpy(values).to(self.device, non_blocking=True,
                                                               copy=True)
@@ -103,9 +104,12 @@ class Rollout:
             getattr(self, name)[t] = getattr(env, name)
         self.rewards[t] = env.rewards.sum(1)
         self.end_rewards[t] = env.end_rewards.sum(2)
+        sight = "sight" in self.lists
         return Inputs(self.floats[t], self.place[t], self.lists["held"][t],
                       self.sizes["held"][t],
-                      Legal(self.lists["legal"][t], self.sizes["legal"][t]))
+                      Legal(self.lists["legal"][t], self.sizes["legal"][t]),
+                      sight=self.lists["sight"][t] if sight else None,
+                      sight_sizes=self.sizes["sight"][t] if sight else None)
 
     def finish(self, env, last_value, gamma, lam):
         last = (env.team, env.first, env.done, env.rewards.sum(1), env.end_rewards.sum(2),
@@ -122,14 +126,16 @@ class Rollout:
         device = self.device
         there = picked.to(device, non_blocking=True)
         lists = {}
-        for name in ("legal", "held"):
+        for name in self.lists:
             sizes = self.sizes[name].flatten()
             chosen = sizes[picked]
             lists[name] = (*gather(*self._flat[name], there, chosen), chosen)
         actions, rows, sizes = lists["legal"]
         held, held_rows, held_sizes = lists["held"]
+        sight, _, sight_sizes = lists.get("sight", (None, None, None))
         return Inputs(self.floats.flatten(0, 1)[there], self.place.flatten()[there], held,
-                      held_sizes, Legal(actions, sizes, rows), held_rows), there
+                      held_sizes, Legal(actions, sizes, rows), held_rows, sight,
+                      sight_sizes), there
 
     def minibatches(self, size, generator):
         """Shuffled minibatches of the decisions to learn from: inputs, and the rest."""

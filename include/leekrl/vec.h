@@ -35,6 +35,7 @@ typedef struct {
     leekrl_trim trim;         /* casts that are not legal actions */
     int face_enemy;           /* turn the world around the acting entity */
     int repeat_moves;         /* let an entity move again right after a move */
+    int sight;                /* list the cells from which the enemy leek can be seen */
     leekrl_build_options builds;
     leekrl_reward_options rewards;
 } leekrl_vec_options;
@@ -51,6 +52,10 @@ typedef struct {
  * a single move reaches the same cells for as few MP. But it can after a move whose
  * path could have entered the zone of a plant it has not awakened, or made with more MP
  * than the longest move.
+ *
+ * Sight (off by default): the cells the acting entity could move to with its MP, its own
+ * included, from which the enemy leek would be in its line of sight, once it has left its
+ * cell. Range and the items' own rules are not taken into account.
  */
 void leekrl_vec_options_init(leekrl_vec_options *options);
 
@@ -72,6 +77,8 @@ enum {
  * legal and held are lists of varying lengths: those of the first environment, then of
  * the next one, and so on without any gap. legal holds the legal actions, in order, and
  * at least the end of turn. held and place describe the map, see leekrl_observation.
+ * sight holds, with the sight option, map indices as those of held (without category):
+ * see leekrl_vec_options. Not needed without it.
  * map is optional. symmetry is how the world is turned.
  *
  * rewards holds the parts of the reward of the deciding team's previous decision, zeros
@@ -86,6 +93,8 @@ typedef struct {
     int32_t *legal_counts; /* N */
     int16_t *held;         /* at most N x LEEKRL_OBS_MAX_HELD */
     int32_t *held_counts;  /* N */
+    int16_t *sight;        /* at most N x LEEKRL_VEC_MAX_SIGHT, or NULL */
+    int32_t *sight_counts; /* N, or NULL */
     int16_t *place;        /* N */
     uint8_t *symmetry;     /* N */
     uint8_t *map;          /* N x LEEKRL_OBS_MAP_CELLS, or NULL */
@@ -96,6 +105,9 @@ typedef struct {
     float *end_rewards;    /* N x 2 x LEEKRL_REWARD_PARTS */
     float *episode;        /* N x LEEKRL_EPISODE_SIZE */
 } leekrl_vec_buffers;
+
+/* Cells of a sight list: one per move, and the entity's own. */
+#define LEEKRL_VEC_MAX_SIGHT (LEEKRL_MOVE_ACTION_COUNT + 1)
 
 typedef struct leekrl_vec leekrl_vec;
 
@@ -123,6 +135,7 @@ int leekrl_vec_items(int32_t *weapons, int32_t *chips);
 typedef struct {
     int map_cells;
     int max_held;      /* LEEKRL_OBS_MAX_HELD */
+    int max_sight;     /* LEEKRL_VEC_MAX_SIGHT */
     int reward_parts;
     int episode_size;
     int stats;

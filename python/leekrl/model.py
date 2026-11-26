@@ -75,8 +75,10 @@ class Legal:
 class Inputs:
     """What the network receives for a batch of decisions."""
 
-    def __init__(self, floats, place, held, held_sizes, legal, held_rows=None):
-        """held holds a code per cell that is not free, held_sizes their numbers, on the CPU."""
+    def __init__(self, floats, place, held, held_sizes, legal, held_rows=None, sight=None,
+                 sight_sizes=None):
+        """held holds a code per cell that is not free, held_sizes their numbers, on the CPU.
+        sight, if given, the cells from which the enemy leek is seen, and their numbers."""
         self.floats = floats
         self.place = place.long()
         self.held = held.long()
@@ -85,6 +87,11 @@ class Inputs:
             floats.device, non_blocking=True)
         self.held_rows = held_rows
         self.legal = legal
+        self.sight = None if sight is None else sight.long()
+        if sight is not None:
+            sight_sizes = sight_sizes.long()
+            self.sight_offsets = (sight_sizes.cumsum(0) - sight_sizes).to(floats.device,
+                                                                          non_blocking=True)
 
     def cells(self):
         """Category of each cell. Those outside the map are said to be free."""
@@ -225,15 +232,17 @@ class PairHead(nn.Module):
 
 class Policy(nn.Module):
     def __init__(self, actions, floats, branch=128, hidden=256, mask_input=True,
-                 head="flat", layers=2):
+                 head="flat", layers=2, sight=False):
         super().__init__()
         self.settings = {"actions": actions, "floats": floats, "branch": branch,
                          "hidden": hidden, "mask_input": mask_input, "head": head,
-                         "layers": layers}
+                         "layers": layers, "sight": sight}
         # A vector per (cell, category) for obstacles and entities, and one per position
         # on the map: together they say as much as the whole map.
         self.map = nn.EmbeddingBag(MAP_CELLS * HELD, branch, mode="sum")
         self.position = nn.Embedding(PLACES, branch)
+        # A vector per cell from which the enemy leek can be seen.
+        self.sight = nn.EmbeddingBag(MAP_CELLS, branch, mode="sum") if sight else None
         self.floats = nn.Linear(floats, branch)
         # A vector per action, summed over the legal ones.
         self.mask = nn.EmbeddingBag(actions, branch, mode="sum") if mask_input else None
@@ -251,14 +260,20 @@ class Policy(nn.Module):
         self.value = nn.Linear(hidden, 1)
         nn.init.normal_(self.map.weight, std=0.1)
         nn.init.normal_(self.position.weight, std=0.1)
+        if sight:
+            nn.init.normal_(self.sight.weight, std=0.1)
         if mask_input:
             nn.init.normal_(self.mask.weight, std=0.06)
         nn.init.orthogonal_(self.value.weight, gain=1)
         nn.init.zeros_(self.value.bias)
 
     def _trunk(self, inputs):
-        parts = [self.map(inputs.held, inputs.held_offsets) + self.position(inputs.place),
-                 self.floats(inputs.floats)]
+        where = self.map(inputs.held, inputs.held_offsets) + self.position(inputs.place)
+        if self.sight is not None:
+            if inputs.sight is None:
+                raise ValueError("this network needs the sight lists")
+            where = where + self.sight(inputs.sight, inputs.sight_offsets)
+        parts = [where, self.floats(inputs.floats)]
         if self.mask is not None:
             parts.append(self.mask(inputs.legal.actions, inputs.legal.offsets))
         return self.trunk(torch.cat(parts, 1))

@@ -46,6 +46,7 @@ class Config:
     trim: str = "harmful"          # casts masked: nothing, useless, or harmful ones too
     face_enemy: bool = True        # turn the world so that the enemy leek is always there
     repeat_moves: bool = False     # allow moving right after a move
+    sight: bool = False            # the cells from which the enemy leek can be seen
     opponent: str = "self"         # self, or random or idle: not learned
     # Network
     branch: int = 128
@@ -85,7 +86,7 @@ def world(config):
     """Settings of the environment, from those of a run, as a dictionary. Those that older
     runs do not give are what they did."""
     old = {"known_probability": 0.01, "skew": 2.0, "trim": "useless", "face_enemy": False,
-           "repeat_moves": True}
+           "repeat_moves": True, "sight": False}
     return {name: config.get(name, value) for name, value in old.items()}
 
 
@@ -113,17 +114,25 @@ def allocator(device):
 
 def inputs(env, device, rows=None):
     """What the network needs, copied from the environment's current arrays."""
+    sight = sight_sizes = None
     if rows is None:
         legal, sizes, held, held_sizes = (env.legal_actions, env.legal_counts, env.held,
                                           env.held_counts)
         floats, place = env.floats, env.place
+        if env.sight is not None:
+            sight, sight_sizes = env.sight, env.sight_counts
     else:
         legal, sizes = take(env.legal_actions, env.legal_counts, rows)
         held, held_sizes = take(env.held, env.held_counts, rows)
         floats, place = env.floats[rows], env.place[rows]
+        if env.sight is not None:
+            sight, sight_sizes = take(env.sight, env.sight_counts, rows)
+    if sight is not None:
+        sight, sight_sizes = torch.tensor(sight, device=device), torch.tensor(sight_sizes)
     return Inputs(torch.tensor(floats, device=device), torch.tensor(place, device=device),
                   torch.tensor(held, device=device), torch.tensor(held_sizes),
-                  Legal(torch.tensor(legal, device=device), torch.tensor(sizes)))
+                  Legal(torch.tensor(legal, device=device), torch.tensor(sizes)),
+                  sight=sight, sight_sizes=sight_sizes)
 
 
 def random_actions(env, rows, generator):
@@ -250,8 +259,12 @@ def evaluate(model, config, known, fights, seed, opponents=("random",), greedy=F
     playing = np.ones(envs, bool)
     winner, turns = np.zeros(envs, int), np.zeros(envs)
     device = next(model.parameters()).device
+    settings = world(asdict(config))
+    # Lists that one network needs, and the others ignore.
+    settings["sight"] = any(getattr(player, "settings", {}).get("sight", False)
+                            for player in (model, *opponents))
     with VecEnv(envs, threads=config.env_threads, seed=seed, known_builds=known,
-                allocate=allocator(device), **world(asdict(config))) as env:
+                allocate=allocator(device), **settings) as env:
         env.reset()
         while playing.any():
             mine = env.team == side
@@ -382,14 +395,14 @@ def train(config, folder=None):
     details = {"data_hash": env.data_hash, "commit": commit(),
                "known_names": env.known_names}
     model = Policy(env.actions, env.float_count, config.branch, config.hidden,
-                   config.mask_input, config.head, config.layers).to(device)
+                   config.mask_input, config.head, config.layers, config.sight).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, eps=1e-5,
                                  fused=True)
     start = decisions = 0
     fights = Fights()
     if config.resume:
         data = torch.load(config.resume, map_location=device, weights_only=True)
-        settings = {"layers": 2, **data["settings"]}    # older ones do not say
+        settings = {"layers": 2, "sight": False, **data["settings"]}  # older ones do not say
         if data["data_hash"] != env.data_hash or settings != model.settings:
             raise ValueError("the checkpoint was made with other game data or another network")
         if world(data["config"])["face_enemy"] != config.face_enemy:

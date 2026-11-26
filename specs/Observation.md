@@ -60,6 +60,16 @@ The network gets the same thing in another form: for each cell that is not free,
 x 6 + its category - 2, in no particular order; and the position of the map's center,
 `(dy + 17) x 35 + dx + 17`, which says which cells are outside.
 
+### Sight (option)
+
+With the `sight` option, also a list of map indices, in no particular order: the cells the
+acting entity could move to with its MP, its own included, from which the enemy leek
+would be in its line of sight once it has left its own cell. Each gets a vector of its
+own, added to the map's. Range, and the rules of items that act on the first entity in a
+line (`grapple`, `boxing_glove`), are not taken into account. It follows from the map:
+it is given, not guessed, so that the network does not have to learn line of sight
+before it can learn where to go. About 4% slower training.
+
 ## Global (3 floats)
 
 | Index | Content | Scale |
@@ -192,7 +202,8 @@ and trained models no longer fit.
 
 - **Line of sight and walking distance** per cell. The mask shows the cells that can be
   reached or targeted now, but not for actions that are too expensive or on cooldown,
-  and never from the enemy's side.
+  and never from the enemy's side. The sight option only says, for reachable cells,
+  whether the enemy leek can be seen.
 - **Mirroring.** The same situation facing the other way looks different.
 - **Number of actions already played** this turn.
 - **Who cast an effect**, and everything listed in the ADR.

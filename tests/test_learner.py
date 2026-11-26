@@ -526,12 +526,61 @@ class LearnerTests(unittest.TestCase):
                      if name.startswith("eval/")}
             self.assertEqual(found, expected)
 
+    def test_sight(self):
+        """The sight lists reach the network, the rollout and training."""
+        with VecEnv(8, threads=2, seed=3, sight=True) as env:
+            env.reset()
+            seen = inputs(env, "cpu")
+            self.assertEqual(seen.sight.shape, (int(env.sight_counts.sum()),))
+            model = Policy(env.actions, env.float_count, 16, 16, sight=True)
+            _, value = model(seen)
+            fewer = Inputs(seen.floats, seen.place, seen.held, seen.held_sizes, seen.legal,
+                           sight=torch.zeros(8, dtype=torch.long),
+                           sight_sizes=torch.ones(8, dtype=torch.long))
+            self.assertFalse(torch.equal(model(fewer)[1], value))
+            # The whole batch at once or row by row: same results.
+            for i in range(8):
+                _, single = model(inputs(env, "cpu", np.array([i])))
+                torch.testing.assert_close(single[0], value[i])
+            with self.assertRaisesRegex(ValueError, "sight"):
+                model(changed(seen))
+        from leekrl.train import Fights, collect
+        with VecEnv(16, threads=4, seed=5, sight=True) as env:
+            env.reset()
+            model = Policy(env.actions, env.float_count, 16, 16, sight=True)
+            rollout = Rollout(env, 8)
+            collect(env, model, rollout, small(sight=True), torch.Generator().manual_seed(1),
+                    Fights())
+            for _ in rollout.minibatches(1000, torch.Generator().manual_seed(1)):
+                pass
+            for t in range(8):
+                picked, _ = rollout.pick(torch.arange(t * 16, (t + 1) * 16))
+                self.assertTrue(torch.equal(picked.sight, rollout.lists["sight"][t].long()))
+                distribution, _ = model(picked)
+                position = picked.legal.offsets + rollout.choices[t]
+                np.testing.assert_allclose(distribution.log_probs[position].detach(),
+                                           rollout.log_probs[t], atol=1e-5)
+        with tempfile.TemporaryDirectory() as folder:
+            trained, history = train(small(updates=2, sight=True, save_every=1, eval_every=1,
+                                           eval_fights=4), folder)
+            self.assertTrue(trained.settings["sight"])
+            self.assertIn("eval/idle_wins", history[-1])
+            loaded, _ = load_policy(Path(folder) / "checkpoint_000002.pt")
+            self.assertTrue(loaded.settings["sight"])
+            # A network with sight against one without, in the same fights.
+            plain = Policy(trained.settings["actions"], trained.settings["floats"], 16, 16)
+            results = evaluate(loaded, small(), (), 4, 1, (plain,))
+            self.assertAlmostEqual(sum(results[0][k] for k in ("wins", "losses", "draws")), 1)
+            with self.assertRaisesRegex(ValueError, "another network"):
+                train(small(updates=3, resume=str(Path(folder) / "checkpoint_000002.pt")),
+                      folder)
+
     def test_older_runs(self):
         """What the settings of older runs do not say."""
         from leekrl.train import world
         self.assertEqual(world({"skew": 3.0}), {
             "known_probability": 0.01, "skew": 3.0, "trim": "useless", "face_enemy": False,
-            "repeat_moves": True})
+            "repeat_moves": True, "sight": False})
         with tempfile.TemporaryDirectory() as folder:
             train(small(updates=1, save_every=1), folder)
             with self.assertRaisesRegex(ValueError, "turned otherwise"):

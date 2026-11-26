@@ -56,6 +56,7 @@ class VecEnv:
     floats        (n, floats)  float32
     legal_counts  (n,)         int32, legal actions of each environment
     held_counts   (n,)         int32, cells that are not free
+    sight_counts  (n,)         int32, cells from which the enemy leek is seen, if sight
     place         (n,)         int16, where the map is
     symmetry      (n,)         uint8, how the world is turned
     map           (n, 2381)    uint8, cell categories, if dense_map
@@ -66,15 +67,16 @@ class VecEnv:
     end_rewards   (n, 2, 6)    float32, per team, where done
     episode       (n, 11)      float32, see EPISODE_FIELDS, where done
 
-    legal_actions and held hold the lists of all the environments, one after the other:
-    actions in order, and cell x 6 + category - 2.
+    legal_actions, held and sight hold the lists of all the environments, one after the
+    other: actions in order, cell x 6 + category - 2, and cells (see vec.h).
 
     allocate makes the arrays: pinned memory is sent faster to a GPU.
     """
 
     def __init__(self, envs, threads=None, seed=0, known_builds=(), known_probability=None,
                  skip_forced=None, trim=None, face_enemy=None, repeat_moves=None, skew=None,
-                 stat_weights=None, rewards=None, dense_map=False, allocate=np.zeros):
+                 stat_weights=None, rewards=None, dense_map=False, sight=False,
+                 allocate=np.zeros):
         self._lib = library()
         self._vec = None
         layout = self._lib.layout
@@ -96,7 +98,7 @@ class VecEnv:
             options.trim = TRIMS.index(trim)
         for name, value in (("known_probability", known_probability),
                             ("skip_forced", skip_forced), ("face_enemy", face_enemy),
-                            ("repeat_moves", repeat_moves)):
+                            ("repeat_moves", repeat_moves), ("sight", sight)):
             if value is not None:
                 setattr(options, name, value)
         if skew is not None:
@@ -115,6 +117,8 @@ class VecEnv:
         self._held = allocate(envs * layout.max_held, np.int16)
         self.legal_counts = np.zeros(envs, np.int32)
         self.held_counts = np.zeros(envs, np.int32)
+        self._sight = allocate(envs * layout.max_sight, np.int16) if sight else None
+        self.sight_counts = np.zeros(envs, np.int32) if sight else None
         self.place = np.zeros(envs, np.int16)
         self.symmetry = np.zeros(envs, np.uint8)
         self.map = np.zeros((envs, self.map_cells), np.uint8) if dense_map else None
@@ -126,7 +130,8 @@ class VecEnv:
         self.episode = np.zeros((envs, layout.episode_size), np.float32)
         buffers = VecBuffers()
         for name, kind in VecBuffers._fields_:
-            array = getattr(self, {"legal": "_legal", "held": "_held"}.get(name, name))
+            array = getattr(self, {"legal": "_legal", "held": "_held",
+                                   "sight": "_sight"}.get(name, name))
             if array is not None:
                 setattr(buffers, name, array.ctypes.data_as(kind))
 
@@ -197,6 +202,13 @@ class VecEnv:
     @property
     def held(self):
         return self._held[:self.held_counts.sum()]
+
+    @property
+    def sight(self):
+        """None without the sight option."""
+        if self._sight is None:
+            return None
+        return self._sight[:self.sight_counts.sum()]
 
     def legal(self):
         """The legal actions as booleans, (n, actions). A copy."""

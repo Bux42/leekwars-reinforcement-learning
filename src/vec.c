@@ -16,6 +16,7 @@
 #include "lw_entity.h"
 #include "lw_fight.h"
 #include "lw_generator.h"
+#include "lw_los.h"
 #include "lw_map.h"
 #include "lw_outcome.h"
 #include "lw_pathfinding.h"
@@ -53,6 +54,9 @@ typedef struct {
     int n_list;
     int16_t held[LEEKRL_OBS_MAX_HELD];
     int n_held;
+    int8_t seen_dx[LEEKRL_VEC_MAX_SIGHT], seen_dy[LEEKRL_VEC_MAX_SIGHT]; /* not turned */
+    int16_t sight[LEEKRL_VEC_MAX_SIGHT];
+    int n_sight;
     int symmetry;
     const LwEntity *moved;       /* entity that has just moved, and must not move again */
     int decisions[2];
@@ -265,6 +269,35 @@ static int path_matters(const LwState *state, LwEntity *actor, int mp)
     return 0;
 }
 
+/* Cells the actor can move to, its own included, from which the enemy leek is in its
+ * line of sight once it has left its cell. legal: before moves are forbidden. */
+static void find_sight(environment *env, LwEntity *actor, const uint8_t *legal)
+{
+    const leekrl_action *actions = leekrl_action_catalog_actions(env->vec->catalog);
+    LwMap *map = env->state.map;
+    const LwEntity *enemy = leek_of(env, 1 - lw_entity_get_team(actor));
+    LwCell *from = actor->cell, *target;
+    int i;
+    env->n_sight = 0;
+    if (!enemy || !enemy->cell || lw_entity_is_dead(enemy) || !from) return;
+    target = enemy->cell;
+    for (i = 0; i <= LEEKRL_MOVE_ACTION_COUNT; ++i) {
+        LwCell *cell = from;
+        int dx = 0, dy = 0;
+        if (i) {
+            if (!legal[i]) continue;
+            dx = actions[i].dx;
+            dy = actions[i].dy;
+            cell = lw_map_get_cell_xy(map, from->x + dx, from->y + dy);
+            if (!cell) continue;
+        }
+        if (lw_map_verify_los_with_ignored(map, cell, target, NULL, &from->id, 1)) {
+            env->seen_dx[env->n_sight] = (int8_t)dx;
+            env->seen_dy[env->n_sight++] = (int8_t)dy;
+        }
+    }
+}
+
 /* Position of the lowest bit set. */
 static int lowest_bit(uint64_t bits)
 {
@@ -322,6 +355,14 @@ static int write_decision(environment *env, LwEntity *actor, const uint8_t *lega
                         &observation, detail, sizeof(detail)))
         return fail(env, "cannot observe", detail);
     env->n_held = observation.held_count;
+    if (vec->options.sight) {
+        int k;
+        for (k = 0; k < env->n_sight; ++k) {
+            int dx = env->seen_dx[k], dy = env->seen_dy[k];
+            leekrl_turn(env->symmetry, &dx, &dy);
+            env->sight[k] = (int16_t)leekrl_obs_map_index(dx, dy);
+        }
+    }
     out->place[index] = (int16_t)observation.place;
     out->symmetry[index] = (uint8_t)env->symmetry;
     list_legal(env, legal);
@@ -350,6 +391,7 @@ static int advance(environment *env)
                 if (status != LEEKRL_ACTION_OK)
                     return fail(env, "cannot compute the mask",
                                 leekrl_action_status_string(status));
+                if (vec->options.sight) find_sight(env, actor, legal);
                 if (env->moved == actor)
                     memset(legal + 1, 0, LEEKRL_MOVE_ACTION_COUNT);
                 if (!vec->options.skip_forced || !only_end_turn(legal, vec->actions))
@@ -444,7 +486,7 @@ static void step_task(void *context, int index)
 static int run(leekrl_vec *vec, leekrl_task task)
 {
     const leekrl_vec_buffers *out = &vec->buffers;
-    int16_t *legal = out->legal, *held = out->held;
+    int16_t *legal = out->legal, *held = out->held, *sight = out->sight;
     int i;
     leekrl_threads_run(vec->threads, task, vec, vec->options.envs);
     for (i = 0; i < vec->options.envs; ++i) {
@@ -458,6 +500,10 @@ static int run(leekrl_vec *vec, leekrl_task task)
         memcpy(held, env->held, (size_t)env->n_held * sizeof(*held));
         legal += out->legal_counts[i] = env->n_list;
         held += out->held_counts[i] = env->n_held;
+        if (vec->options.sight) {
+            memcpy(sight, env->sight, (size_t)env->n_sight * sizeof(*sight));
+            sight += out->sight_counts[i] = env->n_sight;
+        }
     }
     vec->ready = 1;
     return 1;
@@ -588,6 +634,7 @@ void leekrl_vec_layout(leekrl_vec_layout_info *layout)
     if (!layout) return;
     layout->map_cells = LEEKRL_OBS_MAP_CELLS;
     layout->max_held = LEEKRL_OBS_MAX_HELD;
+    layout->max_sight = LEEKRL_VEC_MAX_SIGHT;
     layout->reward_parts = LEEKRL_REWARD_PARTS;
     layout->episode_size = LEEKRL_EPISODE_SIZE;
     layout->stats = LEEKRL_STAT_COUNT;
@@ -669,7 +716,7 @@ leekrl_vec *leekrl_vec_create(const leekrl_vec_options *options,
         !buffers->floats || !buffers->legal || !buffers->legal_counts || !buffers->held ||
         !buffers->held_counts || !buffers->place || !buffers->symmetry || !buffers->rewards ||
         !buffers->team || !buffers->first || !buffers->done || !buffers->end_rewards ||
-        !buffers->episode) {
+        !buffers->episode || (options->sight && (!buffers->sight || !buffers->sight_counts))) {
         creation_error(NULL, error, error_size, "invalid argument");
         return NULL;
     }
