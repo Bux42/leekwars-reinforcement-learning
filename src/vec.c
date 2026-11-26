@@ -2,6 +2,7 @@
 
 #include "leekrl/actions.h"
 #include "leekrl/plant_ai.h"
+#include "leekrl/record.h"
 #include "leekrl/rules.h"
 #include "leekrl/symmetry.h"
 #include "leekrl/threads.h"
@@ -59,6 +60,11 @@ typedef struct {
     int redrawn;
     int start_life[2];
     int fight_seed;
+    int recording;               /* record the fights that start */
+    int recorded;                /* this fight is being recorded */
+    int report;                  /* 1 if the fight that ended at the last call is recorded,
+                                  * -1 if its record is incomplete */
+    leekrl_record record;
     char error[192];
 } environment;
 
@@ -180,7 +186,8 @@ static int start_fight(environment *env)
                                           &env->state, &env->fight, &env->outcome))
             return fail(env, "scenario refused", NULL);
         env->started = 1;
-        env->state.actions.stream.enabled = 0; /* nobody reads the report */
+        /* Without a record, nobody reads the action log. */
+        env->state.actions.stream.enabled = env->recording;
         if (lw_fight_step_start(&env->fight))
             return fail(env, "fight cannot start", lw_state_get_fatal_error_message(&env->state));
         a = leek_of(env, 0);
@@ -196,6 +203,8 @@ static int start_fight(environment *env)
         env->start_life[team] = lw_entity_get_total_life(leek_of(env, team));
     }
     env->moved = NULL;
+    env->recorded = env->recording;
+    if (env->recorded) leekrl_record_start(&env->record, &env->state);
     if (!leekrl_obstacles_find(&env->fight, &env->obstacles))
         return fail(env, "map too large", NULL);
     leekrl_reward_start(&env->rewards, &env->vec->options.rewards, &env->fight);
@@ -221,6 +230,7 @@ static int finish_fight(environment *env)
     }
     if (lw_fight_step_finish(&env->fight, 0))
         return fail(env, "fight cannot finish", lw_state_get_fatal_error_message(&env->state));
+    if (env->recorded) env->report = leekrl_record_finish(&env->record, &env->state) ? 1 : -1;
     for (team = 0; team < 2; ++team)
         leekrl_reward_end(&env->rewards, &vec->options.rewards, &env->fight, team,
                           parts + team * LEEKRL_REWARD_PARTS);
@@ -332,6 +342,7 @@ static int advance(environment *env)
     int restarts = 0;
     for (;;) {
         LwEntity *actor = lw_fight_step_current(&env->fight);
+        if (env->recorded) leekrl_record_drain(&env->record, &env->state);
         if (actor) {
             if (!lw_entity_is_dead(actor) && !lw_state_is_finished(&env->state)) {
                 leekrl_action_status status = leekrl_action_catalog_trimmed_mask(
@@ -367,6 +378,7 @@ static void reset_task(void *context, int index)
     uint64_t seed = vec->options.seed;
     stop_fight(env);
     env->error[0] = 0;
+    env->report = 0;
     vec->buffers.done[index] = 0;
     /* Unrelated streams for each environment. */
     env->rng = draw(&seed) ^ ((uint64_t)index + 1) * UINT64_C(0xD6E8FEB86659FD93);
@@ -395,6 +407,7 @@ static void step_task(void *context, int index)
     leekrl_action_status status;
     int result, mp;
     vec->buffers.done[index] = 0;
+    env->report = 0;
     if (chosen == LEEKRL_VEC_WAIT) return;
     if (!actor || !is_legal(env, chosen)) {
         char detail[32];
@@ -469,6 +482,31 @@ int leekrl_vec_step(leekrl_vec *vec, const int32_t *actions)
 }
 
 const char *leekrl_vec_error(const leekrl_vec *vec) { return vec ? vec->error : ""; }
+
+int leekrl_vec_record(leekrl_vec *vec, int index, int on)
+{
+    if (!vec || index < 0 || index >= vec->options.envs) return 0;
+    vec->envs[index]->recording = on != 0;
+    return 1;
+}
+
+int leekrl_vec_recorded_actions(const leekrl_vec *vec, int index)
+{
+    if (!vec || index < 0 || index >= vec->options.envs || !vec->envs[index]->recorded)
+        return -1;
+    return vec->envs[index]->record.n_actions;
+}
+
+const char *leekrl_vec_report(const leekrl_vec *vec, int index, int *complete)
+{
+    const environment *env;
+    if (complete) *complete = 0;
+    if (!vec || index < 0 || index >= vec->options.envs) return NULL;
+    env = vec->envs[index];
+    if (!env->report) return NULL;
+    if (complete) *complete = env->report == 1;
+    return env->record.report.data;
+}
 size_t leekrl_vec_actions(const leekrl_vec *vec) { return vec ? vec->actions : 0; }
 size_t leekrl_vec_floats(const leekrl_vec *vec) { return vec ? vec->floats : 0; }
 
@@ -684,6 +722,7 @@ void leekrl_vec_destroy(leekrl_vec *vec)
     for (i = 0; vec->envs && i < vec->options.envs; ++i) {
         if (!vec->envs[i]) continue;
         stop_fight(vec->envs[i]);
+        leekrl_record_free(&vec->envs[i]->record);
         free(vec->envs[i]->list);
         free(vec->envs[i]);
     }

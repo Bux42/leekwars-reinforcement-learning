@@ -2,6 +2,8 @@
 
     python -m leekrl.peek --checkpoint runs/first-run/checkpoint_000100.pt --fights 3
 
+With --viewer, the fights are also written for the Leek Wars fight viewer (see viewer.py).
+
 Everything shown about the world is decoded from the inputs of the network, and from
 nothing else: what is missing from the page is missing for the agent. It is only turned
 back, to show the fight on a map that does not turn.
@@ -15,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from . import viewer
 from .builds import load_known_builds
 from .model import Policy
 from .native import ROOT, library
@@ -142,8 +145,12 @@ def decode(floats, names, symmetry=0):
                      for k in np.flatnonzero(uses)]}
 
 
-def record(model, fights, seed, known=(), opponent="self", max_decisions=3000, **settings):
-    """Play fights, keeping every decision. opponent: self, random or idle (team 1)."""
+def record(model, fights, seed, known=(), opponent="self", max_decisions=3000, report=False,
+           **settings):
+    """Play fights, keeping every decision. opponent: self, random or idle (team 1).
+
+    With report, each fight also has the report of the fight viewer, and each decision the
+    index of its first action there ("at")."""
     from .train import inputs
     names, cells_of = item_names(), turned_cells()
     actions_of = turned_actions().argsort(1)        # the other way round
@@ -152,6 +159,8 @@ def record(model, fights, seed, known=(), opponent="self", max_decisions=3000, *
     for number in range(fights):
         with VecEnv(1, threads=1, seed=seed + number, known_builds=known, dense_map=True,
                     **settings) as env:
+            if report:
+                env.record(0)
             env.reset()
             decisions, last = [], [None, None]
             while len(decisions) < max_decisions:
@@ -183,22 +192,68 @@ def record(model, fights, seed, known=(), opponent="self", max_decisions=3000, *
                     "actions": shown.tolist(),
                     "probs": [round(float(p), 5) for p in distribution.probs],
                     "chosen": int(shown[position])})
+                if report:
+                    decisions[-1]["at"] = env.recorded_actions(0)
                 env.step(np.array([int(actions[position])]))
                 if env.done[0]:
                     break
-            end = None
+            end, data = None, None
             if env.done[0]:
+                if report:
+                    data = env.report(0)
                 for team in (0, 1):
                     if last[team] is not None:
                         decisions[last[team]]["reward"] = (
                             env.end_rewards[0, team].round(4).tolist())
                 end = dict(zip(EPISODE_FIELDS, env.episode[0].round(4).tolist()))
             result.append({"seed": seed + number, "decisions": decisions, "end": end})
+            if report:
+                known_names = env.known_names
+                result[-1]["report"] = data
+                result[-1]["known"] = [known_names[int(end[f"known_{team}"]) - 1]
+                                       if end and end[f"known_{team}"] else None
+                                       for team in (0, 1)]
+    return result
+
+
+def action_name(action, names, table):
+    """What an action does, in words: dx and dy as seen on the map that does not turn."""
+    kind, item, dx, dy = table[action]
+    if kind == 0:
+        return "end turn"
+    what = ("move" if kind == 1 else names["weapons"][item] if kind == 2
+            else names["chips"][item])
+    return f"{what} ({dx:+d}, {dy:+d})"
+
+
+def write_viewer(output, fight, players):
+    """Writes a recorded fight for the fight viewer. players: who plays each team."""
+    data, end = fight["report"], fight["end"]
+    names, table = item_names(), action_table()
+    teams = [player + (f" ({build})" if build else "")
+             for player, build in zip(players, fight["known"])]
+    messages = []
+    for decision in fight["decisions"]:
+        if decision["scripted"]:
+            continue
+        probs = decision["probs"]
+        top = np.argsort(probs)[::-1][:3]
+        chosen = decision["actions"].index(decision["chosen"])
+        messages.append((decision["at"], (
+            f"value {decision['value']:+.3f}, entropy {decision['entropy']:.2f}, "
+            f"{len(probs)} legal: {action_name(decision['chosen'], names, table)} "
+            f"p={probs[chosen]:.2f} | best: " +
+            ", ".join(f"{action_name(decision['actions'][k], names, table)} {probs[k]:.2f}"
+                      for k in top))))
+    document = viewer.fight_document(data, teams, int(end["winner"]), fight["seed"])
+    return viewer.save(output, document, viewer.fight_logs(data, messages))
     return result
 
 
 def write(path, fights, title):
     names = item_names()
+    fights = [{k: v for k, v in fight.items() if k not in ("report", "known")}
+              for fight in fights]
     data = {"title": title, "fights": fights, "parts": REWARD_PARTS,
             "weapons": names["weapons"], "chips": names["chips"],
             "table": action_table().reshape(-1).tolist(), "floats": float_names(names)}
@@ -220,6 +275,9 @@ def main():
     parser.add_argument("--trim", choices=TRIMS,
                         help="casts masked, as in training by default")
     parser.add_argument("--out", help="runs/peek.html, or next to the checkpoint")
+    parser.add_argument("--viewer", metavar="OUTPUT",
+                        help="also write the fights into this output folder of the fight "
+                             "viewer, one new folder each")
     options = parser.parse_args()
     if options.checkpoint:
         from .train import load_policy, world
@@ -237,8 +295,16 @@ def main():
     if options.trim:
         settings["trim"] = options.trim
     fights = record(model, options.fights, options.seed, load_known_builds(),
-                    options.opponent, **settings)
+                    options.opponent, report=bool(options.viewer), **settings)
     print(write(out, fights, f"{title}, against {options.opponent}"))
+    if options.viewer:
+        players = (("agent 1", "agent 2") if options.opponent == "self"
+                   else ("agent", options.opponent))
+        for fight in fights:
+            if fight["report"] is None:
+                print(f"fight {fight['seed']} did not end")
+            else:
+                print(write_viewer(options.viewer, fight, players))
 
 
 if __name__ == "__main__":

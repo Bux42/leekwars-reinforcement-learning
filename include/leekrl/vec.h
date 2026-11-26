@@ -151,6 +151,19 @@ int leekrl_vec_reset(leekrl_vec *vec);
 int leekrl_vec_step(leekrl_vec *vec, const int32_t *actions);
 const char *leekrl_vec_error(const leekrl_vec *vec);
 
+/* Records the fights that start in an environment from now on, or stops. Recorded
+ * fights are a little slower. 0 if the index is wrong. */
+int leekrl_vec_record(leekrl_vec *vec, int index, int on);
+
+/* Actions recorded so far in the fight of an environment: the next ones are those of its
+ * decision. -1 if not recorded. */
+int leekrl_vec_recorded_actions(const leekrl_vec *vec, int index);
+
+/* The report of the recorded fight of an environment that ended at the last reset or
+ * step, where done: the "data" object of a Leek Wars fight, in JSON (see record.h).
+ * NULL otherwise. complete is 0 if actions are missing. Valid until the next call. */
+const char *leekrl_vec_report(const leekrl_vec *vec, int index, int *complete);
+
 #ifdef __cplusplus
 }
 #endif

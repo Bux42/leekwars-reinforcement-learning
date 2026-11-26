@@ -1,6 +1,7 @@
 """Many 1v1 self-play fights side by side. See include/leekrl/vec.h."""
 
 import ctypes
+import json
 import os
 
 import numpy as np
@@ -163,6 +164,31 @@ class VecEnv:
             raise ValueError(f"{self.envs} actions expected, not {actions.shape}")
         self._check(self._lib.leekrl_vec_step(
             self._vec, actions.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))))
+
+    def record(self, rows, on=True):
+        """Record the fights that start in some environments from now on, or stop."""
+        self._open()
+        for row in np.atleast_1d(rows):
+            if not self._lib.leekrl_vec_record(self._vec, int(row), bool(on)):
+                raise IndexError(f"no environment {row}")
+
+    def recorded_actions(self, row):
+        """Actions of the fight recorded so far, in an environment: the next ones come from
+        its decision. -1 if not recorded."""
+        self._open()
+        return self._lib.leekrl_vec_recorded_actions(self._vec, int(row))
+
+    def report(self, row):
+        """Where done, the recorded fight that ended: the "data" of a Leek Wars fight
+        report, as a dictionary. None for fights that are not recorded."""
+        self._open()
+        complete = ctypes.c_int()
+        text = self._lib.leekrl_vec_report(self._vec, int(row), ctypes.byref(complete))
+        if text is None:
+            return None
+        if not complete.value:
+            raise RuntimeError(f"the record of environment {row} misses actions")
+        return json.loads(text)
 
     @property
     def legal_actions(self):

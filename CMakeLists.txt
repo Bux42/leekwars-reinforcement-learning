@@ -134,7 +134,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/weapons.json" AND
             "${CMAKE_CURRENT_SOURCE_DIR}/summons.json"
             "${CMAKE_CURRENT_SOURCE_DIR}/components.json"
         VERBATIM)
-    target_sources(leekrl PRIVATE "${LEEKRL_SNAPSHOT_C}" src/build.c src/vec.c)
+    target_sources(leekrl PRIVATE "${LEEKRL_SNAPSHOT_C}" src/build.c src/record.c src/vec.c)
     target_compile_definitions(leekrl PUBLIC LEEKRL_HAS_ITEM_SNAPSHOT=1)
 
     # Loaded by the Python package in python/leekrl.

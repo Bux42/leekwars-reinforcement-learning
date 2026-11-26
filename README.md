@@ -197,7 +197,10 @@ The network's size is set by `--branch` (width of what each kind of input become
 
 `python -m leekrl.peek --checkpoint runs/first-run/checkpoint_000050.pt` writes a local
 HTML page to step through fights: what the network receives, decoded, and what it makes of
-it. `--peek-every 50` writes one regularly during training.
+it. `--peek-every 50` writes one regularly during training. With `--viewer OUTPUT`, the
+fights are also written for the Leek Wars fight viewer: a new `OUTPUT/<random id>/` folder
+each, with `fight.json` (the generator's format) and `logs.json` (what the network thought
+at each decision).
 
 `python -m leekrl.show_builds` writes another one about the random builds of training fights.
 

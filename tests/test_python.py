@@ -190,6 +190,50 @@ class PythonTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "illegal action"):
                 env.step([-2, 0])
 
+    def test_records(self):
+        """Recorded fights are the same, and their reports hold every action."""
+        random = np.random.default_rng(2)
+        reports = []
+        with VecEnv(4, threads=2, seed=6) as env, VecEnv(4, threads=2, seed=6) as other:
+            env.record([0, 2])
+            env.reset()
+            other.reset()
+            self.assertEqual(env.recorded_actions(1), -1)
+            while len(reports) < 6:
+                actions = [int(random.choice(np.flatnonzero(row))) for row in env.legal()]
+                self.assertGreater(env.recorded_actions(0), 0)
+                env.step(actions)
+                other.step(actions)
+                np.testing.assert_array_equal(env.floats, other.floats)
+                np.testing.assert_array_equal(env.episode, other.episode)
+                for row in np.flatnonzero(env.done == 1):
+                    report = env.report(row)
+                    self.assertEqual(report is None, row % 2 == 1)
+                    if report is not None:
+                        reports.append((report, env.episode[row].copy()))
+                self.assertIsNone(env.report(1))
+        for report, episode in reports:
+            self.assertEqual(sorted(report), ["actions", "dead", "leeks", "map", "ops",
+                                              "version"])
+            actions = report["actions"]
+            self.assertEqual(actions[0], [0])                   # START_FIGHT
+            turns = [a[1] for a in actions if a[0] == 6]        # NEW_TURN, from turn 2
+            self.assertEqual(turns, list(range(2, len(turns) + 2)))
+            # A turn can begin before the end of the fight is seen, and the turn count goes
+            # past the last turn.
+            self.assertIn(turns[-1] - episode[EPISODE_FIELDS.index("turns")], (-1, 0, 1))
+            leeks = [leek for leek in report["leeks"] if not leek["summon"]]
+            self.assertEqual(sorted(leek["team"] for leek in leeks), [1, 2])
+            self.assertEqual(len({leek["id"] for leek in report["leeks"]}),
+                             len(report["leeks"]))
+            winner = int(episode[EPISODE_FIELDS.index("winner")])
+            dead = {int(k) - 1: v for k, v in report["dead"].items()}
+            self.assertEqual(sorted(dead), [0, 1])
+            if winner >= 0:
+                self.assertTrue(dead[1 - winner])
+                self.assertFalse(dead[winner])
+        self.assertGreater(max(len(r["actions"]) for r, _ in reports), 2048)
+
     def test_errors(self):
         with self.assertRaises(ValueError):
             VecEnv(0)
