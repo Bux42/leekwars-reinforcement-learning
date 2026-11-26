@@ -84,6 +84,10 @@ int leekrl_build_base(leekrl_stat stat);
  * purchase sequence gives exactly that amount. */
 int leekrl_build_cost(leekrl_stat stat, int bought);
 
+/* The other way round: points that this capital buys, or -1 if it cannot be spent
+ * exactly on that stat. */
+int leekrl_build_points(leekrl_stat stat, int capital);
+
 /* Fill a leek definition, released with lw_entity_info_dispose. */
 void leekrl_build_to_entity(const leekrl_build *build, int id, LwEntityInfo *info);
 

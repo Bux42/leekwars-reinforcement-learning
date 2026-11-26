@@ -83,6 +83,18 @@ int leekrl_build_cost(leekrl_stat stat, int bought)
     return points == bought ? total : -1;
 }
 
+int leekrl_build_points(leekrl_stat stat, int capital)
+{
+    int total = 0, points = 0;
+    if ((int)stat < 0 || stat >= LEEKRL_STAT_COUNT || capital < 0) return -1;
+    while (total < capital) {
+        const cost_step *step = next_step(stat, points);
+        points += step->gain;
+        total += step->capital;
+    }
+    return total == capital ? points : -1;
+}
+
 static const leekrl_component *find_component(int id)
 {
     size_t i, n;

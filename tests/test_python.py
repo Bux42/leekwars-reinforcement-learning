@@ -300,6 +300,50 @@ class PythonTests(unittest.TestCase):
         refused(lambda b: b["weapons"].__setitem__(1, "dark_katana"), "forgotten")
         refused(lambda b: b.__setitem__("name", "example_poison"), "appears twice")
 
+    def test_import_loadout(self):
+        """A loadout, as a fight report copies it, becomes the same known build."""
+        from leekrl.import_build import loadout_entry
+        from leekrl.native import STATS, library
+
+        lib = library()
+        for stat in range(len(STATS)):
+            for bought in range(0, 700, 7):
+                cost = lib.leekrl_build_cost(stat, bought)
+                if cost >= 0:
+                    self.assertEqual(lib.leekrl_build_points(stat, cost), bought)
+        name, _, build = load_known_builds(ROOT / "builds" / "known_builds.example.json")[0]
+        example = json.loads((ROOT / "builds" / "known_builds.example.json").read_text("utf-8"))
+        entry = next(b for b in example["builds"] if b["name"] == name)
+        weapons = entry["weapons"]
+        loadout = {
+            "type": "leek-wars-loadout", "version": 1, "name": "Copied",
+            "weapons": ["weapon_" + w for w in weapons[1:]],
+            "forgotten_weapons": ["weapon_" + weapons[0]],
+            "chips": ["chip_" + c for c in entry["chips"]],
+            "components": [{"slot": 7 - i, "item": c, "stats": {}}
+                           for i, c in enumerate(reversed(entry["components"]))],
+            "stats": {s: lib.leekrl_build_cost(i, build.bought[i])
+                      for i, s in enumerate(STATS) if build.bought[i]}}
+        copied, warnings = loadout_entry(loadout)
+        self.assertEqual(warnings, [])
+        self.assertEqual(copied["name"], "Copied")
+        self.assertEqual(copied["characteristics"], entry["characteristics"])
+        self.assertEqual(copied["components"], entry["components"])
+        self.assertEqual(sorted(copied["weapons"]), sorted(weapons))
+        self.assertEqual(copied["chips"], entry["chips"])
+        # Alterations are kept, and counted in the characteristics.
+        loadout["components"][0]["stats"] = {"life": 40, "magic": -50}
+        altered, _ = loadout_entry(loadout)
+        self.assertEqual(altered["components"][7], {"name": entry["components"][7],
+                                                    "stats": {"life": 40, "magic": -50}})
+        self.assertEqual(altered["characteristics"]["life"],
+                         entry["characteristics"]["life"] + 40)
+        for wrong, message in ((dict(loadout, type="other"), "not a Leek Wars loadout"),
+                               (dict(loadout, stats={"luck": 1}), "unknown stats"),
+                               (dict(loadout, stats={"tp": 31}), "cannot be spent exactly")):
+            with self.assertRaisesRegex(ValueError, message):
+                loadout_entry(wrong)
+
     def test_import_build(self):
         """A leek as the Leek Wars API describes it becomes the same known build."""
         from leekrl.import_build import add, build_entry, leek_id

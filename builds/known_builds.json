@@ -50,6 +50,418 @@
         "inversion",
         "teleportation"
       ]
+    },
+    {
+      "name": "Astheo solo",
+      "weight": 1.0,
+      "characteristics": {
+        "life": 3327,
+        "strength": 0,
+        "wisdom": 203,
+        "agility": 238,
+        "resistance": 0,
+        "science": 0,
+        "magic": 1141,
+        "frequency": 100,
+        "cores": 17,
+        "ram": 19,
+        "tp": 26,
+        "mp": 5
+      },
+      "components": [
+        {
+          "name": "hokajin",
+          "stats": {
+            "life": 3,
+            "agility": -1,
+            "resistance": -70,
+            "magic": 52
+          }
+        },
+        {
+          "name": "thokozani",
+          "stats": {
+            "strength": -50,
+            "resistance": -50,
+            "science": -50,
+            "magic": 82
+          }
+        },
+        {
+          "name": "chiyembekezo",
+          "stats": {
+            "life": 1,
+            "agility": 2,
+            "magic": 37
+          }
+        },
+        {
+          "name": "motherboard3",
+          "stats": {
+            "life": 43,
+            "science": -20,
+            "frequency": -30,
+            "tp": 1
+          }
+        },
+        {
+          "name": "uzoma",
+          "stats": {
+            "life": 4,
+            "agility": -3,
+            "magic": 30
+          }
+        },
+        {
+          "name": "hylocereus",
+          "stats": {
+            "life": 41,
+            "wisdom": -7,
+            "magic": 31
+          }
+        },
+        {
+          "name": "ram3",
+          "stats": {
+            "life": 30,
+            "ram": 1
+          }
+        },
+        {
+          "name": "core3",
+          "stats": {
+            "magic": 9,
+            "frequency": -30,
+            "tp": 1
+          }
+        }
+      ],
+      "weapons": ["double_gun", "flame_thrower", "gazor", "plutonium_bazooka"],
+      "chips": [
+        "vaccine",
+        "leather_boots",
+        "regeneration",
+        "teleportation",
+        "ball_and_chain",
+        "tranquilizer",
+        "soporific",
+        "plague",
+        "fracture",
+        "antidote",
+        "jump",
+        "covid",
+        "elevation",
+        "knowledge",
+        "wizardry",
+        "serum",
+        "arsenic",
+        "manumission",
+        "neutronium"
+      ]
+    },
+    {
+      "name": "Solo",
+      "weight": 1.0,
+      "characteristics": {
+        "life": 2734,
+        "strength": 581,
+        "wisdom": 381,
+        "agility": 250,
+        "resistance": 35,
+        "science": 660,
+        "magic": 0,
+        "frequency": 123,
+        "cores": 12,
+        "ram": 23,
+        "tp": 33,
+        "mp": 7
+      },
+      "components": [
+        {
+          "name": "chestnut",
+          "stats": {
+            "life": -7,
+            "strength": 43,
+            "agility": 4,
+            "resistance": -40
+          }
+        },
+        {
+          "name": "quince",
+          "stats": {
+            "life": -18,
+            "wisdom": -9,
+            "resistance": -5,
+            "tp": 1
+          }
+        },
+        {
+          "name": "ram3",
+          "stats": {
+            "life": 4,
+            "tp": 1
+          }
+        },
+        {
+          "name": "motherboard3",
+          "stats": {
+            "life": 51,
+            "wisdom": 4,
+            "science": 6,
+            "frequency": -30,
+            "tp": 1
+          }
+        },
+        {
+          "name": "thokozani",
+          "stats": {
+            "strength": 8,
+            "wisdom": 5,
+            "agility": -4,
+            "resistance": -50,
+            "science": 66,
+            "magic": -50
+          }
+        },
+        {
+          "name": "neural_core_pro",
+          "stats": {
+            "wisdom": 1,
+            "science": -13,
+            "frequency": -7,
+            "tp": 1
+          }
+        },
+        {
+          "name": "motherboard2",
+          "stats": {
+            "life": -15,
+            "science": -2,
+            "frequency": -20,
+            "tp": 1
+          }
+        },
+        {
+          "name": "ssd",
+          "stats": {
+            "life": -16,
+            "wisdom": -10,
+            "science": 3,
+            "tp": 1
+          }
+        }
+      ],
+      "weapons": [
+        "lightninger",
+        "quantum_rifle",
+        "m_laser",
+        "mysterious_electrisor"
+      ],
+      "chips": [
+        "protein",
+        "seven_league_boots",
+        "leather_boots",
+        "adrenaline",
+        "rage",
+        "steroid",
+        "reflexes",
+        "rockfall",
+        "lightning",
+        "liberation",
+        "regeneration",
+        "meteorite",
+        "teleportation",
+        "armoring",
+        "inversion",
+        "metallic_bulb",
+        "remission",
+        "antidote",
+        "jump",
+        "elevation",
+        "knowledge",
+        "serum",
+        "manumission"
+      ]
+    },
+    {
+      "name": "Peuwareau solo",
+      "weight": 1.0,
+      "characteristics": {
+        "life": 2905,
+        "strength": 759,
+        "wisdom": 500,
+        "agility": 410,
+        "resistance": 0,
+        "science": 120,
+        "magic": 0,
+        "frequency": 150,
+        "cores": 8,
+        "ram": 23,
+        "tp": 33,
+        "mp": 7
+      },
+      "components": [
+        {
+          "name": "motherboard2",
+          "stats": {
+            "life": 10,
+            "tp": 1
+          }
+        },
+        {
+          "name": "ram3",
+          "stats": {
+            "life": 1,
+            "wisdom": 12,
+            "tp": 1
+          }
+        },
+        {
+          "name": "elinvar_spring",
+          "stats": {
+            "life": 3,
+            "strength": 40,
+            "agility": 13,
+            "resistance": -20
+          }
+        },
+        {
+          "name": "ssd",
+          "stats": {
+            "wisdom": 2,
+            "tp": 1
+          }
+        },
+        {
+          "name": "quince",
+          "stats": {
+            "life": -11,
+            "wisdom": 5,
+            "resistance": -40,
+            "tp": 1
+          }
+        },
+        {
+          "name": "motherboard3",
+          "stats": {
+            "strength": 4,
+            "wisdom": 19,
+            "tp": 1
+          }
+        },
+        {
+          "name": "thokozani",
+          "stats": {
+            "strength": 74,
+            "wisdom": 6,
+            "agility": 1,
+            "resistance": -50,
+            "magic": -50
+          }
+        },
+        {
+          "name": "chestnut",
+          "stats": {
+            "life": 2,
+            "strength": 7,
+            "resistance": -40,
+            "tp": 1
+          }
+        }
+      ],
+      "weapons": [
+        "rhino",
+        "lightninger",
+        "glowing_saber",
+        "mysterious_electrisor"
+      ],
+      "chips": [
+        "protein",
+        "adrenaline",
+        "steroid",
+        "stalactite",
+        "iceberg",
+        "rockfall",
+        "liberation",
+        "regeneration",
+        "teleportation",
+        "armoring",
+        "inversion",
+        "healer_bulb",
+        "metallic_bulb",
+        "remission",
+        "antidote",
+        "jump",
+        "elevation",
+        "knowledge",
+        "savant_bulb",
+        "serum",
+        "manumission",
+        "prism",
+        "maturation"
+      ]
+    },
+    {
+      "name": "LeekyMinaj",
+      "weight": 1.0,
+      "characteristics": {
+        "life": 2980,
+        "strength": 620,
+        "wisdom": 445,
+        "agility": 280,
+        "resistance": 300,
+        "science": 330,
+        "magic": 0,
+        "frequency": 170,
+        "cores": 8,
+        "ram": 26,
+        "tp": 24,
+        "mp": 9
+      },
+      "components": [
+        "motherboard3",
+        "chestnut",
+        "motherboard2",
+        "soursop",
+        "ssd",
+        "gyroscope",
+        "elinvar_spring",
+        "ram3"
+      ],
+      "weapons": [
+        "heavy_sword",
+        "bazooka",
+        "quantum_rifle",
+        "illicit_grenade_launcher"
+      ],
+      "chips": [
+        "protein",
+        "vaccine",
+        "seven_league_boots",
+        "winged_boots",
+        "leather_boots",
+        "motivation",
+        "adrenaline",
+        "rage",
+        "steroid",
+        "reflexes",
+        "warm_up",
+        "stalactite",
+        "lightning",
+        "liberation",
+        "regeneration",
+        "armoring",
+        "remission",
+        "antidote",
+        "alteration",
+        "wizard_bulb",
+        "elevation",
+        "knowledge",
+        "mutation",
+        "savant_bulb",
+        "serum",
+        "manumission"
+      ]
     }
   ]
 }

@@ -1,11 +1,15 @@
-"""Add the build of a public Leek Wars leek to the known builds.
+"""Add the build of a public Leek Wars leek, or a loadout, to the known builds.
 
     python -m leekrl.import_build https://leekwars.com/leek/131073
     python -m leekrl.import_build 131073 --name my_build --weight 2
+    python -m leekrl.import_build            (a loadout copied to the clipboard)
+    python -m leekrl.import_build loadout.json
 
-Asks https://leekwars.com/api/leek/get/<id> for the leek, and nothing else is sent: no
-account, no cookie. Its characteristics, components, weapons and chips become an entry of
-builds/known_builds.json, checked like any known build before the file is written.
+For a leek, asks https://leekwars.com/api/leek/get/<id>, and nothing else is sent: no
+account, no cookie. A loadout is what the copy button of a fight report gives: the
+capital spent on each stat, components, weapons and chips. Loadouts are read locally.
+Either becomes an entry of builds/known_builds.json, checked like any known build before
+the file is written.
 
 Builds have 8 components and 4 weapons. Altered components keep their alterations.
 """
@@ -13,13 +17,14 @@ Builds have 8 components and 4 weapons. Altered components keep their alteration
 import argparse
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import urllib.request
 from pathlib import Path
 
 from .builds import _read, load_known_builds
-from .native import ROOT, STATS
+from .native import ROOT, STATS, library
 
 API = "https://leekwars.com/api/leek/get/{}"
 LEVEL = 301
@@ -75,6 +80,84 @@ def build_entry(leek, name=None, weight=1.0, data=ROOT):
     return entry, warnings
 
 
+def loadout_entry(loadout, name=None, weight=1.0, data=ROOT):
+    """A known build from a loadout, at level 301. Returns (entry, warnings)."""
+    if loadout.get("type") != "leek-wars-loadout":
+        raise ValueError("not a Leek Wars loadout")
+    if loadout.get("version") != 1:
+        raise ValueError(f"loadout version {loadout.get('version')}: only 1 is known")
+    lib = library()
+    spent = loadout.get("stats", {})
+    unknown = set(spent) - set(STATS)
+    if unknown:
+        raise ValueError(f"unknown stats: {', '.join(sorted(unknown))}")
+    standard = {c["name"]: dict(c["stats"])
+                for c in _read(Path(data) / "components.json").values()}
+    components, unknown = [], []
+    for slot in sorted(loadout.get("components", []), key=lambda c: c["slot"]):
+        if slot["item"] not in standard:
+            unknown.append(slot["item"])
+        altered = {s: v for s, v in (slot.get("stats") or {}).items() if v}
+        components.append({"name": slot["item"], "stats": altered} if altered
+                          else slot["item"])
+    if unknown:
+        raise ValueError(f"unknown components: {', '.join(unknown)}: is the game data up to "
+                         "date?")
+    characteristics = {}
+    for index, stat in enumerate(STATS):
+        points = lib.leekrl_build_points(index, int(spent.get(stat, 0)))
+        if points < 0:
+            raise ValueError(f"{spent[stat]} capital cannot be spent exactly on {stat}")
+        given = 0
+        for component in components:
+            if isinstance(component, str):
+                component = {"name": component, "stats": {}}
+            given += standard[component["name"]].get(stat, 0) + component["stats"].get(stat, 0)
+        characteristics[stat] = lib.leekrl_build_base(index) + points + given
+    entry = {
+        "name": name or loadout.get("name") or "loadout",
+        "weight": float(weight),
+        "characteristics": characteristics,
+        "components": components,
+        "weapons": [w.removeprefix("weapon_") for w in
+                    loadout.get("weapons", []) + loadout.get("forgotten_weapons", [])],
+        "chips": [c.removeprefix("chip_") for c in loadout.get("chips", [])],
+    }
+    return entry, []
+
+
+def clipboard():
+    """The text of the clipboard."""
+    try:
+        import tkinter
+
+        root = tkinter.Tk()
+        root.withdraw()
+        try:
+            return root.clipboard_get()
+        finally:
+            root.destroy()
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        return subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                              capture_output=True, text=True, encoding="utf-8",
+                              check=True).stdout
+    raise ValueError("cannot read the clipboard: give the loadout as a file")
+
+
+def parse_loadout(text, where):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        hint = ""
+        if where == "argument" and '"' not in text:
+            hint = (": the shell removed its quotes. Copy the loadout and run the command "
+                    "without argument, to read the clipboard")
+        raise ValueError(f"the loadout of the {where} is not valid JSON{hint or f': {error}'}"
+                         ) from error
+
+
 def add(entry, path, replace=False, data=ROOT):
     """Adds an entry to a known builds file, once checked. Returns whether it replaced one."""
     from .vec import VecEnv
@@ -104,8 +187,11 @@ def add(entry, path, replace=False, data=ROOT):
 
 def main(arguments=None):
     parser = argparse.ArgumentParser(prog="python -m leekrl.import_build")
-    parser.add_argument("leek", help="id of the leek, or the address of its page")
-    parser.add_argument("--name", help="name of the build, the leek's by default")
+    parser.add_argument("source", nargs="?",
+                        help="id of a leek, or the address of its page; or a loadout file, "
+                             "or its JSON text. The clipboard's loadout if not given")
+    parser.add_argument("--name", help="name of the build, the leek's or the loadout's by "
+                                       "default")
     parser.add_argument("--weight", type=float, default=1.0,
                         help="how often it is drawn, among the known builds")
     parser.add_argument("--file", default=ROOT / "builds" / "known_builds.json")
@@ -115,10 +201,22 @@ def main(arguments=None):
     if not options.weight > 0:
         parser.error("the weight must be positive")
     try:
-        leek = fetch(leek_id(options.leek))
-        entry, warnings = build_entry(leek, options.name, options.weight)
+        source = options.source
+        if source is None:
+            loadout = parse_loadout(clipboard(), "clipboard")
+        elif source.lstrip().startswith("{"):
+            loadout = parse_loadout(source, "argument")
+        elif Path(source).is_file():
+            loadout = parse_loadout(Path(source).read_text("utf-8-sig"), "file")
+        else:
+            loadout = None
+        if loadout is not None:
+            entry, warnings = loadout_entry(loadout, options.name, options.weight)
+        else:
+            leek = fetch(leek_id(options.source))
+            entry, warnings = build_entry(leek, options.name, options.weight)
         replaced = add(entry, options.file, options.replace)
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
         sys.exit(f"error: {error}")
     for warning in warnings:
         print(f"warning: {warning}")

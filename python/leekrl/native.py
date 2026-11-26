@@ -88,6 +88,7 @@ def _declare(library):
         "leekrl_vec_report": (c_char_p, [c_void_p, c_int, POINTER(c_int)]),
         "leekrl_build_base": (c_int, [c_int]),
         "leekrl_build_stat": (c_int, [POINTER(Build), c_int]),
+        "leekrl_build_points": (c_int, [c_int, c_int]),
         "leekrl_build_options_init": (None, [POINTER(BuildOptions)]),
         "leekrl_build_random": (c_int, [c_void_p, POINTER(BuildOptions), POINTER(c_uint64),
                                         POINTER(Build)]),

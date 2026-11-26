@@ -176,7 +176,10 @@ builds are read from `builds/known_builds.json`; `known_builds.example.json` sho
 format, where characteristics include components. An altered component is written
 `{"name": ..., "stats": {...}}`, with what the alteration adds or removes.
 `python -m leekrl.import_build https://leekwars.com/leek/131073` adds the build of a public
-leek, read from the Leek Wars API (`--name`, `--weight`, `--replace`).
+leek, read from the Leek Wars API (`--name`, `--weight`, `--replace`). Without argument, it adds
+the loadout of the clipboard instead, as the copy button of a fight report gives it (a file
+or the JSON text work too).
+Loadouts also have forgotten weapons, which the API leaves out of a leek's weapons.
 
 ### Training
 
