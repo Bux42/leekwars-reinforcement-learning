@@ -94,7 +94,7 @@ static const leekrl_component *find_component(int id)
 
 int leekrl_build_stat(const leekrl_build *build, leekrl_stat stat)
 {
-    int i, value = base_stats[stat] + build->bought[stat];
+    int i, value = base_stats[stat] + build->bought[stat] + build->altered[stat];
     for (i = 0; i < LEEKRL_BUILD_COMPONENTS; ++i) {
         const leekrl_component *component = find_component(build->components[i]);
         if (component) value += component->stats[stat];

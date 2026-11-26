@@ -17,7 +17,7 @@ extern "C" {
  *
  * Rules: 1780 capital points, all spent; 8 unique components; 4 unique weapons,
  * at most one forgotten (legendary); unique chips, as many as RAM allows and at
- * most 32. Component alterations are not supported.
+ * most 32. Random builds have no component alterations.
  */
 #define LEEKRL_BUILD_LEVEL 301
 #define LEEKRL_BUILD_CAPITAL 1780
@@ -32,6 +32,7 @@ typedef struct {
     int weapons[LEEKRL_BUILD_WEAPONS];       /* item ids */
     int chips[LEEKRL_BUILD_CHIPS];           /* item ids */
     int n_chips;
+    int altered[LEEKRL_STAT_COUNT];          /* what component alterations add, or remove */
 } leekrl_build;
 
 /*
@@ -72,7 +73,7 @@ int leekrl_build_random(const leekrl_build_pool *pool, const leekrl_build_option
 int leekrl_build_validate(const leekrl_build_pool *pool, const leekrl_build *build,
                           char *error, size_t error_size);
 
-/* Final value of a stat: base + bought + components. Life is at least 10. Other
+/* Final value of a stat: base + bought + components + alterations. Life is at least 10. Other
  * stats can be negative, as in the game. */
 int leekrl_build_stat(const leekrl_build *build, leekrl_stat stat);
 

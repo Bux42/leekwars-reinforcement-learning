@@ -16,7 +16,8 @@ STATS = ("life", "strength", "wisdom", "agility", "resistance", "science", "magi
 
 class Build(Structure):
     _fields_ = [("components", c_int * 8), ("bought", c_int * len(STATS)),
-                ("weapons", c_int * 4), ("chips", c_int * 32), ("n_chips", c_int)]
+                ("weapons", c_int * 4), ("chips", c_int * 32), ("n_chips", c_int),
+                ("altered", c_int * len(STATS))]
 
 
 class BuildOptions(Structure):

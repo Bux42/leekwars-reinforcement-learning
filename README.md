@@ -153,7 +153,7 @@ count and a first seed to run more: `test_stepping 5000 1`.
 
 `leekrl/vec.h` plays many 1v1 fights side by side with several threads, the agent
 controlling both teams. Finished fights are replaced at once, with random builds or,
-for 1% of the sides by default, a known build. Results depend on the seed and the
+for 2% of the sides by default, a known build. Results depend on the seed and the
 actions, never on the number of threads.
 
 `python/leekrl` wraps it, with NumPy arrays written directly by C:
@@ -173,7 +173,10 @@ their team are not legal, nor are moves right after a move: see `adr/observation
 Rewards belong to the previous decision of the team that decides now: see `vec.h`.
 The package looks for the C library under `build*/`, or at `LEEKRL_LIBRARY`. Known
 builds are read from `builds/known_builds.json`; `known_builds.example.json` shows the
-format, where characteristics include components.
+format, where characteristics include components. An altered component is written
+`{"name": ..., "stats": {...}}`, with what the alteration adds or removes.
+`python -m leekrl.import_build https://leekwars.com/leek/131073` adds the build of a public
+leek, read from the Leek Wars API (`--name`, `--weight`, `--replace`).
 
 ### Training
 

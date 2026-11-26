@@ -41,7 +41,7 @@ class Config:
     steps: int = 32                # decisions per environment and update
     env_threads: int = 16
     known_builds: str = ""         # file, builds/known_builds.json by default
-    known_probability: float = 0.01
+    known_probability: float = 0.02
     skew: float = 2.0
     trim: str = "harmful"          # casts masked: nothing, useless, or harmful ones too
     face_enemy: bool = True        # turn the world so that the enemy leek is always there

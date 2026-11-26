@@ -22,7 +22,10 @@ def _ids(names, known, kind, build):
 def load_known_builds(path=None, data=ROOT):
     """List of (name, weight, Build). Characteristics in the file include components.
 
-    Only the format is checked here: VecEnv checks that each build is legal.
+    A component is its name, or {"name": ..., "stats": {stat: points}} when altered: stats
+    are what the alteration adds, or removes (negative), as the Leek Wars API gives them.
+    Only the format is checked here: VecEnv checks that each build is legal. Alterations
+    are not checked.
     """
     data = Path(data)
     path = Path(path) if path else data / "builds" / "known_builds.json"
@@ -37,12 +40,23 @@ def load_known_builds(path=None, data=ROOT):
             raise ValueError(f"build {name!r} appears twice")
         names.add(name)
         totals = entry["characteristics"]
+        altered = dict.fromkeys(STATS, 0)
+        parts = []
+        for component in entry["components"]:
+            if isinstance(component, str):
+                component = {"name": component}
+            unknown = set(component.get("stats") or {}) - set(STATS)
+            if unknown:
+                raise ValueError(f"build {name!r}: unknown altered stats: "
+                                 f"{', '.join(sorted(unknown))}")
+            for stat, points in (component.get("stats") or {}).items():
+                altered[stat] += points
+            parts.append(component["name"])
         if set(totals) != set(STATS):
             wrong = ", ".join(sorted(set(totals) ^ set(STATS)))
             raise ValueError(f"build {name!r}: missing or unknown characteristics: {wrong}")
-        ids = _ids(entry["components"], {n: c["id"] for n, c in components.items()},
-                   "components", name)
-        for key, values, count in (("components", entry["components"], 8),
+        ids = _ids(parts, {n: c["id"] for n, c in components.items()}, "components", name)
+        for key, values, count in (("components", parts, 8),
                                    ("weapons", entry["weapons"], 4)):
             if len(values) != count:
                 raise ValueError(f"build {name!r}: {count} {key} expected, not {len(values)}")
@@ -55,9 +69,9 @@ def load_known_builds(path=None, data=ROOT):
             build.chips[i] = chip
         build.n_chips = len(entry["chips"])
         for i, stat in enumerate(STATS):
-            given = sum(dict(components[c]["stats"]).get(stat, 0)
-                        for c in entry["components"])
-            build.bought[i] = totals[stat] - base[i] - given
+            given = sum(dict(components[c]["stats"]).get(stat, 0) for c in parts)
+            build.altered[i] = altered[stat]
+            build.bought[i] = totals[stat] - base[i] - given - altered[stat]
         builds.append((name, float(entry.get("weight", 1)), build))
     return builds
 
@@ -102,6 +116,7 @@ def describe(build, data=ROOT):
     return {"stats": {name: library().leekrl_build_stat(ctypes.byref(build), i)
                       for i, name in enumerate(STATS)},
             "bought": dict(zip(STATS, build.bought)),
+            "altered": {s: v for s, v in zip(STATS, build.altered) if v},
             "components": [components[i] for i in build.components],
             "weapons": [weapons[i] for i in build.weapons],
             "chips": [chips[i] for i in build.chips[:build.n_chips]]}

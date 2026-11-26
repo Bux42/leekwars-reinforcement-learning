@@ -96,7 +96,7 @@ void leekrl_vec_options_init(leekrl_vec_options *options)
     memset(options, 0, sizeof(*options));
     options->envs = 1;
     options->threads = 1;
-    options->known_probability = 0.01;
+    options->known_probability = 0.02;
     options->skip_forced = 1;
     options->trim = LEEKRL_TRIM_HARMFUL;
     options->face_enemy = 1;

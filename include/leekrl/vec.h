@@ -40,7 +40,7 @@ typedef struct {
 } leekrl_vec_options;
 
 /*
- * 1 env, 1 thread, seed 0, 1% of known builds, forced turns skipped, useless and
+ * 1 env, 1 thread, seed 0, 2% of known builds, forced turns skipped, useless and
  * harmful casts masked, the enemy faced, moves not repeated.
  *
  * Facing the enemy: observations and actions are turned by the symmetry that brings

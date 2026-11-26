@@ -300,6 +300,80 @@ class PythonTests(unittest.TestCase):
         refused(lambda b: b["weapons"].__setitem__(1, "dark_katana"), "forgotten")
         refused(lambda b: b.__setitem__("name", "example_poison"), "appears twice")
 
+    def test_import_build(self):
+        """A leek as the Leek Wars API describes it becomes the same known build."""
+        from leekrl.import_build import add, build_entry, leek_id
+
+        self.assertEqual(leek_id("https://leekwars.com/leek/131073"), 131073)
+        self.assertEqual(leek_id("131073"), 131073)
+        with self.assertRaises(ValueError):
+            leek_id("https://leekwars.com/farmer/131073")
+        example = json.loads((ROOT / "builds" / "known_builds.example.json").read_text("utf-8"))
+        build = example["builds"][0]
+
+        def ids(file, key):
+            with open(ROOT / file, encoding="utf-8-sig") as f:
+                return {item["name"]: item for item in json.load(f).values()}, key
+
+        tables = {kind: ids(*args) for kind, args in (
+            ("components", ("components.json", "template")),
+            ("weapons", ("weapons.json", "item")), ("chips", ("chips.json", "id")))}
+        leek = {"id": 7, "name": "Somebody", "level": 301}
+        for kind, (table, key) in tables.items():
+            leek[kind] = [{"template": table[n][key], "stats": None} for n in build[kind]]
+        given = {stat: sum(dict(tables["components"][0][c]["stats"]).get(stat, 0)
+                           for c in build["components"])
+                 for stat in build["characteristics"]}
+        for stat, total in build["characteristics"].items():
+            leek[stat], leek[f"total_{stat}"] = total - given[stat], total
+        entry, warnings = build_entry(leek, weight=2)
+        self.assertEqual(warnings, [])
+        self.assertEqual(entry["name"], "Somebody")
+        for key in ("characteristics", "components", "weapons", "chips"):
+            self.assertEqual(entry[key], build[key])
+        # Altered components keep their alterations, and fights get the leek's stats.
+        leek["components"][2]["stats"] = {"life": 30, "tp": 1, "science": -20, "magic": 0}
+        for stat, points in leek["components"][2]["stats"].items():
+            leek[f"total_{stat}"] += points
+        entry, warnings = build_entry(leek)
+        self.assertEqual(warnings, [])
+        self.assertEqual(entry["components"][2], {"name": build["components"][2],
+                                                  "stats": {"life": 30, "tp": 1,
+                                                            "science": -20}})
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "known_builds.json"
+            add(entry, path)
+            known = load_known_builds(path)
+        with VecEnv(1, threads=1, known_builds=known, known_probability=1) as env:
+            env.record(0)
+            env.reset()
+            while not env.done[0]:
+                env.step([0])
+            for leek_data in env.report(0)["leeks"]:
+                for stat in ("life", "tp", "science", "magic", "strength"):
+                    self.assertEqual(leek_data[stat], leek[f"total_{stat}"])
+        leek["chips"] = [{"template": -1}]
+        with self.assertRaisesRegex(ValueError, "unknown chips"):
+            build_entry(leek)
+        leek["weapons"] = [None] * 4
+        with self.assertRaisesRegex(ValueError, "lacks weapons"):
+            build_entry(leek)
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "known_builds.json"
+            entry, _ = build_entry({**leek, "chips": [], "weapons": [
+                {"template": tables["weapons"][0][n]["item"]} for n in build["weapons"]]})
+            self.assertFalse(add(entry, path))
+            with self.assertRaisesRegex(ValueError, "already named"):
+                add(entry, path)
+            self.assertTrue(add(entry, path, replace=True))
+            self.assertEqual([n for n, _, _ in load_known_builds(path)], ["Somebody"])
+            entry["characteristics"]["tp"] += 1000
+            with self.assertRaises(ValueError):
+                add(entry, path, replace=True)
+            self.assertEqual(json.loads(path.read_text("utf-8"))["builds"][0]
+                             ["characteristics"]["tp"], leek["total_tp"])
+
 
 if __name__ == "__main__":
     unittest.main()

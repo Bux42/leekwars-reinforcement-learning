@@ -271,7 +271,7 @@ def main():
     parser.add_argument("--fights", type=int, default=2)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--opponent", choices=("self", "random", "idle"), default="self")
-    parser.add_argument("--known-probability", type=float, default=0.01)
+    parser.add_argument("--known-probability", type=float, default=0.02)
     parser.add_argument("--trim", choices=TRIMS,
                         help="casts masked, as in training by default")
     parser.add_argument("--out", help="runs/peek.html, or next to the checkpoint")
