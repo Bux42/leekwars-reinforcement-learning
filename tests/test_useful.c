@@ -3,8 +3,9 @@
  *
  * Useless ones must change nothing: each is executed on a clone of the fight,
  * which must then only differ by what casting costs (TP, uses, cooldown, weapon
- * in hand, random numbers). Kept casts are also executed, to measure how many
- * useless ones remain.
+ * in hand, random numbers). Or exactly what a kept cast of the same item does: one
+ * is kept of those that only matter to their caster. Kept casts are also executed,
+ * to measure how many useless ones remain.
  *
  * Harmful ones must be those of the list agreed on, written a second time here,
  * no more and no less. They must never help: the fight is followed with and
@@ -308,6 +309,24 @@ static int changes(session *s, LwEntity *actor, const leekrl_action *action)
     return different;
 }
 
+/* Whether two actions lead to the same situation, with the same random numbers. */
+static int same_outcome(session *s, const leekrl_action *a, const leekrl_action *b)
+{
+    static LwState one, two;
+    static LwFight first, second;
+    int result, same;
+    CHECK(lw_fight_step_clone(&first, &one, &s->fight));
+    CHECK(lw_fight_step_clone(&second, &two, &s->fight));
+    CHECK(leekrl_action_execute(&first, lw_fight_step_current(&first), a, &result) ==
+          LEEKRL_ACTION_OK);
+    CHECK(leekrl_action_execute(&second, lw_fight_step_current(&second), b, &result) ==
+          LEEKRL_ACTION_OK);
+    same = same_situation(&one, &two) && one.rng_n == two.rng_n;
+    lw_state_dispose(&one);
+    lw_state_dispose(&two);
+    return same;
+}
+
 /* ---- Harmful casts ------------------------------------------------------ */
 
 enum { MEASURES = 15 };
@@ -468,7 +487,7 @@ int main(int argc, char **argv)
     long harmful = 0, followed = 0, turns = 0, empty_kept = 0, by_reason[HELPS + 1] = {0};
     long excepted[EXCEPTIONS] = {0}, followed_excepted[EXCEPTIONS] = {0}, helped[EXCEPTIONS] = {0};
     long covid_itself = 0, bramble_enemy = 0, superinfection_own = 0, own_summons = 0, steals = 0;
-    long heals = 0, idle_crits = 0, idle[5] = {0};
+    long heals = 0, idle_crits = 0, idle[5] = {0}, alike = 0;
     if (!leekrl_item_snapshot_register(error, sizeof(error))) {
         fprintf(stderr, "item registration: %s\n", error);
         return 1;
@@ -554,10 +573,18 @@ int main(int argc, char **argv)
                             idle[4] += action->item_id == COVID;
                         }
                         if (changes(s, actor, action)) {
-                            fprintf(stderr, "seed %d: trimmed cast of item %d at (%d, %d) is "
-                                    "not useless\n", current_seed, action->item_id,
-                                    action->dx, action->dy);
-                            exit(1);
+                            size_t j;
+                            for (j = 0; j < n; ++j)
+                                if (useful[j] && actions[j].kind == action->kind &&
+                                    actions[j].item_id == action->item_id &&
+                                    same_outcome(s, action, &actions[j])) break;
+                            if (j == n) {
+                                fprintf(stderr, "seed %d: trimmed cast of item %d at (%d, %d) is "
+                                        "not useless\n", current_seed, action->item_id,
+                                        action->dx, action->dy);
+                                exit(1);
+                            }
+                            ++alike;
                         }
                         continue;
                     }
@@ -626,6 +653,7 @@ int main(int argc, char **argv)
            "with a weapon healing on critical hits, %ld maximum life taken at full life, %ld "
            "superinfections, %ld antidotes, %ld liberations, %ld covids)\n", tried, steals, heals,
            idle_crits, idle[0], idle[1], idle[2], idle[3], idle[4]);
+    printf("%ld trimmed casts did what a kept one of the same item does\n", alike);
     printf("%ld harmful casts followed for %.1f turns, that never helped\n", followed,
            (double)turns / (double)followed);
     printf("harmful: %ld damage the caster, %ld poison it, %ld take its maximum life, %ld only "
@@ -644,6 +672,7 @@ int main(int argc, char **argv)
     CHECK(effective > kept_tried / 3);
     for (i = DAMAGES; i <= HELPS; ++i) CHECK(by_reason[i]);
     for (i = 1; i < EXCEPTIONS; ++i) CHECK(excepted[i]);
+    CHECK(alike);
     CHECK(idle[0] && idle[1] && idle[2] && idle[3] && idle[4]);
     CHECK(steals && heals && idle_crits && covid_itself && bramble_enemy && superinfection_own && own_summons);
     CHECK(helped[FED_DAMAGE] && helped[FED_POISON] && helped[FED_EROSION] && helped[REPLACED]);

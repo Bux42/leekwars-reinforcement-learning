@@ -125,14 +125,14 @@ typedef enum {
 } leekrl_trim;
 
 /*
- * Same as leekrl_action_catalog_mask, without some casts. Every cast is kept for
- * a caster that its critical hits would heal.
+ * Same as leekrl_action_catalog_mask, without some casts.
  *
  * Useless: the area holds no entity any of the effects accepts and can change:
- * none to heal, to cure, to infect... Kept: casts with an effect on the caster
- * whatever the target (a sword's shield), summons and teleports.
+ * none to heal, to cure, to infect... Summons and teleports are kept. A cast that
+ * matters to its caster whatever it reaches (a sword's shield, critical hits that
+ * heal it) is kept once on such a cell: they all do the same.
  *
- * Harmful: every effect either
+ * Harmful, unless critical hits would heal the caster: every effect either
  * - takes TP, MP or characteristics from its own team, or makes it unhealable;
  * - heals or strengthens an enemy, or removes its shackles;
  * - damages, poisons or weakens nobody but the caster, a leek.

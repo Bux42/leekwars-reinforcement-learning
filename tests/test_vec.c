@@ -385,6 +385,7 @@ static void test_repeated_moves(void)
                        last[i][LEEKRL_OBS_TOTAL_LIFE] == me[LEEKRL_OBS_TOTAL_LIFE] &&
                        me[LEEKRL_OBS_MP] < last[i][LEEKRL_OBS_MP] &&
                        me[LEEKRL_OBS_TP] == last[i][LEEKRL_OBS_TP] &&
+                       me[LEEKRL_OBS_MP] < me[LEEKRL_OBS_TOTAL_MP] &&
                        last[i][LEEKRL_OBS_MP] * 15 < LEEKRL_MAX_MOVE_DISTANCE + 0.5f;
                 ++decisions[repeat];
                 if (same && moves) {

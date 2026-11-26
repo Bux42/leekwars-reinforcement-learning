@@ -536,6 +536,7 @@ typedef struct {
     int propagation;   /* someone carries a poison that propagates */
     int summon;        /* the caster is one */
     int healable;      /* the caster would receive a heal */
+    int crits;         /* its critical hits would heal it, whatever it casts */
 } circumstances;
 
 /* Whether a heal would give it anything now. */
@@ -561,6 +562,8 @@ typedef struct {
 /* What a cast needs to be kept. */
 typedef struct {
     int always;     /* whatever is reached */
+    int placed;     /* the target cell itself matters: summons, teleports */
+    int for_caster; /* matters to the caster whatever is reached */
     int any_entity; /* an entity of any kind is enough */
     int caster_healable;
     int item;
@@ -627,7 +630,7 @@ static void examine(const LwAttack *attack, leekrl_trim trim, const circumstance
                     usefulness *use)
 {
     int i;
-    use->always = use->any_entity = use->n_effects = 0;
+    use->always = use->placed = use->for_caster = use->any_entity = use->n_effects = 0;
     use->item = lw_attack_get_item_id(attack);
     use->caster_healable = now->healable;
     for (i = 0; i < lw_attack_get_effects_count(attack); ++i) {
@@ -643,7 +646,7 @@ static void examine(const LwAttack *attack, leekrl_trim trim, const circumstance
         case LW_EFFECT_TYPE_SUMMON:
         case LW_EFFECT_TYPE_RESURRECT:
         case LW_EFFECT_TYPE_TELEPORT:
-            use->always = 1;
+            use->always = use->placed = 1;
             return;
         case LW_EFFECT_TYPE_ATTRACT:
         case LW_EFFECT_TYPE_PUSH:
@@ -664,8 +667,9 @@ static void examine(const LwAttack *attack, leekrl_trim trim, const circumstance
             if (modifiers & LW_MODIFIER_MULTIPLIED_BY_TARGETS) {
                 worth = ON_ANYONE; /* each target counts for the caster */
             } else if ((worth & ON_CASTER) && (!heals || now->healable)) {
-                use->always = 1;
-                return;
+                /* The other effects still tell which targets matter more. */
+                use->always = use->for_caster = 1;
+                continue;
             } else {
                 continue;
             }
@@ -874,18 +878,23 @@ static leekrl_action_status mask_item(const leekrl_action_catalog *catalog, LwSt
     castable item;
     usefulness use;
     candidates found;
+    int spare = 0;
     size_t i;
     if (!entry) return LEEKRL_ACTION_OK;
     status = check_item(state, actor, kind, id, &item);
     if (status == LEEKRL_ACTION_ILLEGAL) return LEEKRL_ACTION_OK;
     if (status != LEEKRL_ACTION_OK) return status;
     if (trim) {
-        examine(item.attack, trim, now, &use);
-        if (use.always) trim = LEEKRL_TRIM_NOTHING;
+        /* Critical hits matter, harm or not: only useless casts are judged. */
+        examine(item.attack, now->crits ? LEEKRL_TRIM_USELESS : trim, now, &use);
+        if (use.placed) trim = LEEKRL_TRIM_NOTHING;
     }
     if (trim) {
         find_candidates(state, actor, item.attack, &use, &found);
-        if (!found.n) return LEEKRL_ACTION_OK;
+        /* Casts that reach no candidate can matter to the caster all the same: they then
+         * all do the same thing, and one of them is enough. */
+        spare = use.for_caster || now->crits;
+        if (!found.n && !spare) return LEEKRL_ACTION_OK;
         if (lw_attack_get_area_id(item.attack) == LW_AREA_TYPE_SINGLE_CELL) {
             int k;
             for (k = 0; k < found.n; ++k) {
@@ -896,17 +905,27 @@ static leekrl_action_status mask_item(const leekrl_action_catalog *catalog, LwSt
                 if (status == LEEKRL_ACTION_OK) mask[i] = 1;
                 else if (status != LEEKRL_ACTION_ILLEGAL) return status;
             }
-            return LEEKRL_ACTION_OK;
+            if (!spare) return LEEKRL_ACTION_OK;
         }
     }
     for (i = entry->first; i < entry->first + entry->count; ++i) {
         LwCell *target = cell_offset(map, from, catalog->actions[i].dx, catalog->actions[i].dy);
+        int reached = 1;
         if (!target) continue;
         /* Much cheaper than the line of sight. */
-        if (trim && !useful(state, actor, item.attack, &use, &found, target)) continue;
+        if (trim) {
+            reached = useful(state, actor, item.attack, &use, &found, target);
+            if (!reached && !spare) continue;
+            if (reached && lw_attack_get_area_id(item.attack) == LW_AREA_TYPE_SINGLE_CELL)
+                continue; /* already done */
+        }
         status = check_target(state, actor, &item, target, sight);
-        if (status == LEEKRL_ACTION_OK) mask[i] = 1;
-        else if (status != LEEKRL_ACTION_ILLEGAL) return status;
+        if (status == LEEKRL_ACTION_OK) {
+            mask[i] = 1;
+            if (!reached) spare = 0;
+        } else if (status != LEEKRL_ACTION_ILLEGAL) {
+            return status;
+        }
     }
     return LEEKRL_ACTION_OK;
 }
@@ -951,8 +970,8 @@ static leekrl_action_status catalog_mask(const leekrl_action_catalog *catalog,
     }
     /* Casts of this entity can matter by themselves, through critical hits. The heal comes
      * before anything else the cast does. */
-    if ((now.passives & PASSIVE(CRITICAL_TO_HEAL)) && now.healable &&
-        lw_entity_get_agility(actor) > 0) trim = LEEKRL_TRIM_NOTHING;
+    now.crits = (now.passives & PASSIVE(CRITICAL_TO_HEAL)) && now.healable &&
+                lw_entity_get_agility(actor) > 0;
     for (i = 0; i < lw_entity_get_weapons_count(actor); ++i) {
         LwWeapon *weapon = lw_entity_get_weapon_at(actor, i);
         if (!weapon) continue;

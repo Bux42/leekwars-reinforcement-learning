@@ -185,10 +185,17 @@ uses left, for the acting entity only: those of others reset before they play ag
 Date: 2026-11-24. Status: accepted.
 
 A cast whose area holds no entity any of its effects accepts cannot change anything. It is
-masked, except when it affects its caster anyway (a sword's shield), summons or teleports,
-or when the caster's critical hits would heal it (`unstable_destroyer`, with life missing, not
-unhealable and some agility). 518,000 masked casts
-were executed on cloned fights, none had an effect. 84% of legal casts are masked.
+masked, except summons and teleports. 518,000 masked casts were executed on cloned fights,
+none had an effect. 84% of legal casts are masked.
+
+Some casts matter to their caster whatever they reach: a `sword`'s shield, `enhanced_lightninger`'s
+heal, critical hits of a caster they would heal (`unstable_destroyer`, with life missing, not
+unhealable and some agility). Cast on nobody, they all do the same thing, wherever: only one
+of them is kept, for each item (2026-11-26). Before that, a hurt leek with
+`unstable_destroyer` had 347 legal actions instead of about 65, 29% of its casts reached
+nobody, and it scored 41% against random builds instead of 51%. With the same network and
+fights, it scores 50% after the change. 1 million masked casts were checked: each did
+exactly what the kept one of its item does.
 
 What `j_laser` and `quantum_rifle` steal for their caster depends on who they reach: they
 are masked too when they reach nobody.
@@ -227,7 +234,7 @@ Such a cast can still be a strategy. It is kept in these cases:
 
 | Kept | Why |
 |---|---|
-| The caster has `unstable_destroyer`, lacks life, is not unhealable and has agility | Its critical hits heal it, whatever it casts |
+| The caster has `unstable_destroyer`, lacks life, is not unhealable and has agility | Its critical hits heal it, whatever it casts. Of the casts that reach nobody, one per item is kept |
 | The target already has the effect of the same item, and it does not stack: `tranquilizer`, `hemorrhage`, `knowledge`, `prism`, `wizardry` | The new effect replaces it, even that of the other team: a weak `tranquilizer` on oneself removes a strong one |
 | Damage to a leek with `revoked_m_laser`, `plutonium_bazooka`, `mysterious_electrisor` or `unbridled_gazor` | It gives strength, resistance, a shield or magic |
 | Poison on a leek with `illicit_grenade_launcher` or `unbridled_gazor` | It gives science or magic |
