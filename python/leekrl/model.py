@@ -85,25 +85,26 @@ class Inputs:
         self.held_sizes = held_sizes.long()
         self.held_offsets = (self.held_sizes.cumsum(0) - self.held_sizes).to(
             floats.device, non_blocking=True)
+        if held_rows is None:
+            # Where the sizes are, so that the network never waits for them.
+            held_rows = torch.repeat_interleave(torch.arange(len(self.held_sizes)),
+                                                self.held_sizes).to(floats.device)
         self.held_rows = held_rows
         self.legal = legal
         self.sight = None if sight is None else sight.long()
         if sight is not None:
             sight_sizes = sight_sizes.long()
-            self.sight_sizes = sight_sizes
             self.sight_offsets = (sight_sizes.cumsum(0) - sight_sizes).to(floats.device,
                                                                           non_blocking=True)
+            self.sight_rows = torch.repeat_interleave(
+                torch.arange(len(sight_sizes), device=sight_sizes.device),
+                sight_sizes).to(floats.device)
 
     def cells(self):
         """Category of each cell. Those outside the map are said to be free."""
         device, batch = self.floats.device, len(self.floats)
-        rows = self.held_rows
-        if rows is None:
-            rows = torch.repeat_interleave(torch.arange(batch, device=device),
-                                           self.held_sizes.to(device),
-                                           output_size=len(self.held))
         cells = torch.full((batch, MAP_CELLS), FREE, device=device)
-        cells[rows, self.held // HELD] = self.held % HELD + FREE + 1
+        cells[self.held_rows, self.held // HELD] = self.held % HELD + FREE + 1
         return cells
 
 
@@ -239,10 +240,12 @@ def entity_holders(floats):
     present = blocks[:, :, PRESENT] > 0
     where = map_index((blocks[:, :, DX] * MAP_RADIUS).round().long(),
                       (blocks[:, :, DY] * MAP_RADIUS).round().long())
-    holder = torch.zeros(batch, MAP_CELLS, dtype=torch.long, device=floats.device)
-    row, slot = present.nonzero(as_tuple=True)
-    holder[row, where[row, slot]] = slot + 1
-    return blocks, holder
+    # Absent entities go to an extra cell, dropped: no nonzero(), which waits for the GPU.
+    where = torch.where(present, where, MAP_CELLS)
+    slots = torch.arange(1, ENTITIES + 1, device=floats.device).expand(batch, ENTITIES)
+    holder = torch.zeros(batch, MAP_CELLS + 1, dtype=torch.long, device=floats.device)
+    holder.scatter_(1, where, slots)
+    return blocks, holder[:, :MAP_CELLS]
 
 
 class TargetHead(nn.Module):
@@ -289,19 +292,19 @@ class TargetHead(nn.Module):
         entities = torch.cat([hidden.new_zeros(batch, 1, size), self.entity(blocks)], 1)
         on_cell = rows * MAP_CELLS + cell
         # What each action is, whatever the situation: its tool and its target's place.
-        actions = self.tools.weight[self.tool] + self.place.weight[self.cell]
-        target = (actions.index_select(0, legal.actions)
-                  + self.category.weight.index_select(0, inputs.cells().reshape(-1)
-                                                      .index_select(0, on_cell))
+        actions = (self.tools.weight.index_select(0, self.tool)
+                   + self.place.weight.index_select(0, self.cell))
+        # Tiny tables: a product with one-hot rows, faster than adding into them at once.
+        category = nn.functional.one_hot(inputs.cells().reshape(-1).index_select(0, on_cell),
+                                         CATEGORIES).to(hidden.dtype)
+        target = (actions.index_select(0, legal.actions) + category @ self.category.weight
                   + entities.reshape(-1, size).index_select(
                       0, rows * (ENTITIES + 1) + holder.reshape(-1).index_select(0, on_cell)))
         if inputs.sight is not None:
             seen = torch.zeros(batch * MAP_CELLS, dtype=torch.long, device=hidden.device)
-            sight_rows = torch.repeat_interleave(
-                torch.arange(batch, device=hidden.device),
-                inputs.sight_sizes.to(hidden.device), output_size=len(inputs.sight))
-            seen[sight_rows * MAP_CELLS + inputs.sight] = 1
-            target = target + self.seen.weight.index_select(0, seen.index_select(0, on_cell))
+            seen.index_fill_(0, inputs.sight_rows * MAP_CELLS + inputs.sight, 1)
+            seen = nn.functional.one_hot(seen.index_select(0, on_cell), 2).to(hidden.dtype)
+            target = target + seen @ self.seen.weight
         both = torch.cat([self.situation(hidden).index_select(0, rows), target], 1)
         return (self.score(both).squeeze(1)
                 + self.bias.weight.squeeze(1).index_select(0, legal.actions))

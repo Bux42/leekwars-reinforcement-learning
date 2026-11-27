@@ -324,3 +324,32 @@ against 40 to 43% of losses, against a network trained without this rule).
 It can move again after a move whose path could have entered the zone of a plant that it has
 not awakened yet: the path then matters. Also after a move made with more than 20 MP, the
 longest move.
+
+## Cells from which the enemy leek can be seen
+
+Date: 2026-11-26. Status: accepted, the default since 2026-11-27. `--no-sight` goes without.
+
+The network gets the cells it could move to this turn, its own included, from which the
+enemy leek would be in its line of sight. It follows from the map: given, not guessed, so
+that learning where to go does not wait for learning line of sight. Range and the rules of
+first-in-line items are left out. About 4% slower training.
+
+With the same settings otherwise, 10,000 updates each, 1,500 to 2,000 fights per pair:
+12 to 17 Elo more than without it from update 2,000 on, with the small network (256 x 2)
+and with a 4 times wider one (1024 x 2) alike. The wider network itself gave at most 4 to 8
+Elo, 30% slower: capacity was not what held the agent back.
+
+## Actions see their target
+
+Date: 2026-11-27. Status: being confirmed on a full run. `--head target`.
+
+With one output per action, each of the 10,566 actions learns on its own what it targets.
+The target head scores each legal action with a small network (128 wide) that sees the
+situation, the tool (end of turn, move, weapon or chip) and facts about the target cell:
+its category, place, the entity on it, and whether the enemy leek can be seen from it. A
+bias per action keeps what is particular to each. It is told nothing about what is good.
+
+2,500 updates, otherwise as with one output per action and sight: update 1,000 is as strong
+as update 5,000 of one output per action, update 2,500 beats update 10,000 (48.7% of wins
+against 44.9%) and the 4 times wider network (48.3% against 45.7%). It plays 6% of draws
+instead of 9 to 10%. 35% slower, so about 3 times more learned per hour.
