@@ -90,6 +90,7 @@ class Inputs:
         self.sight = None if sight is None else sight.long()
         if sight is not None:
             sight_sizes = sight_sizes.long()
+            self.sight_sizes = sight_sizes
             self.sight_offsets = (sight_sizes.cumsum(0) - sight_sizes).to(floats.device,
                                                                           non_blocking=True)
 
@@ -230,6 +231,82 @@ class PairHead(nn.Module):
         return (wanted * target).sum(1) + self.preference(hidden)[rows, tool]
 
 
+def entity_holders(floats):
+    """Entity blocks, and for each cell of the map the entity on it: its slot + 1, or 0."""
+    batch = floats.shape[0]
+    blocks = floats[:, ENTITY_START:ENTITY_START + ENTITIES * ENTITY_SIZE]
+    blocks = blocks.reshape(batch, ENTITIES, ENTITY_SIZE)
+    present = blocks[:, :, PRESENT] > 0
+    where = map_index((blocks[:, :, DX] * MAP_RADIUS).round().long(),
+                      (blocks[:, :, DY] * MAP_RADIUS).round().long())
+    holder = torch.zeros(batch, MAP_CELLS, dtype=torch.long, device=floats.device)
+    row, slot = present.nonzero(as_tuple=True)
+    holder[row, where[row, slot]] = slot + 1
+    return blocks, holder
+
+
+class TargetHead(nn.Module):
+    """Scores each legal action with a small network that sees, side by side, the situation
+    and the action: its tool (end of turn, move, weapon or chip) and what is known about its
+    target cell, its category and place, the entity on it, and whether the enemy leek can be
+    seen from it. What is learned about targets serves every tool. A bias per action keeps
+    what is particular to each one.
+    """
+
+    def __init__(self, hidden, size=64, width=128):
+        super().__init__()
+        table = torch.from_numpy(action_table()).long()
+        kind, item, dx, dy = table.unbind(1)
+        weapons = int(item[kind == 2].max()) + 1
+        # 0 ends the turn, 1 moves, then weapons, then chips.
+        tool = torch.where(kind == 2, 2 + item, torch.where(kind == 3, 2 + weapons + item,
+                                                            kind))
+        self.register_buffer("tool", tool, persistent=False)
+        self.register_buffer("cell", map_index(dx, dy), persistent=False)
+        self.situation = nn.Linear(hidden, size)
+        self.tools = nn.Embedding(int(tool.max()) + 1, size)
+        self.category = nn.Embedding(CATEGORIES, size)
+        self.place = nn.Embedding(MAP_CELLS, size)
+        self.entity = nn.Linear(ENTITY_SIZE, size)
+        self.seen = nn.Embedding(2, size)
+        self.score = nn.Sequential(nn.ReLU(), nn.Linear(2 * size, width), nn.ReLU(),
+                                   nn.Linear(width, 1))
+        self.bias = nn.Embedding(len(table), 1)
+        for module in (self.tools, self.category, self.place, self.seen):
+            nn.init.normal_(module.weight, std=0.1)
+        nn.init.zeros_(self.bias.weight)
+        # Nearly uniform at first.
+        nn.init.normal_(self.score[-1].weight, std=0.001)
+        nn.init.zeros_(self.score[-1].bias)
+
+    def forward(self, hidden, inputs):
+        # index_select everywhere: its gradient adds rows, where indexing and embeddings sort
+        # their many indices, which is much slower.
+        legal = inputs.legal
+        rows, cell = legal.rows, self.cell[legal.actions]
+        batch, size = len(hidden), self.tools.weight.shape[1]
+        blocks, holder = entity_holders(inputs.floats)
+        entities = torch.cat([hidden.new_zeros(batch, 1, size), self.entity(blocks)], 1)
+        on_cell = rows * MAP_CELLS + cell
+        # What each action is, whatever the situation: its tool and its target's place.
+        actions = self.tools.weight[self.tool] + self.place.weight[self.cell]
+        target = (actions.index_select(0, legal.actions)
+                  + self.category.weight.index_select(0, inputs.cells().reshape(-1)
+                                                      .index_select(0, on_cell))
+                  + entities.reshape(-1, size).index_select(
+                      0, rows * (ENTITIES + 1) + holder.reshape(-1).index_select(0, on_cell)))
+        if inputs.sight is not None:
+            seen = torch.zeros(batch * MAP_CELLS, dtype=torch.long, device=hidden.device)
+            sight_rows = torch.repeat_interleave(
+                torch.arange(batch, device=hidden.device),
+                inputs.sight_sizes.to(hidden.device), output_size=len(inputs.sight))
+            seen[sight_rows * MAP_CELLS + inputs.sight] = 1
+            target = target + self.seen.weight.index_select(0, seen.index_select(0, on_cell))
+        both = torch.cat([self.situation(hidden).index_select(0, rows), target], 1)
+        return (self.score(both).squeeze(1)
+                + self.bias.weight.squeeze(1).index_select(0, legal.actions))
+
+
 class Policy(nn.Module):
     def __init__(self, actions, floats, branch=128, hidden=256, mask_input=True,
                  head="flat", layers=2, sight=False):
@@ -255,6 +332,8 @@ class Policy(nn.Module):
             self.policy = FlatHead(hidden, actions)
         elif head == "pair":
             self.policy = PairHead(hidden)
+        elif head == "target":
+            self.policy = TargetHead(hidden)
         else:
             raise ValueError(f"unknown head {head!r}")
         self.value = nn.Linear(hidden, 1)

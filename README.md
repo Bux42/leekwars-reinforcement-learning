@@ -198,6 +198,12 @@ paths W&B normally adds; `--wandb offline` keeps them in the run folder. To stop
 press Ctrl+C or create a file named `stop` in the run's folder: the current update is
 finished and a checkpoint saved, to continue with `--resume`.
 
+`--eval-opponents idle,long-2:10000` evaluates every `--eval-every` updates against the
+idle opponent and the checkpoint of update 10000 of `long-2` (or a checkpoint's path),
+always on the same fights: its `eval/long-2:10000_wins` measures runs on the same scale.
+New runs see, by default, the cells from which the enemy leek can be seen (`--no-sight`
+to leave them out): see `specs/Observation.md`.
+
 The network's size is set by `--branch` (width of what each kind of input becomes),
 `--hidden` and `--layers`.
 

@@ -170,7 +170,7 @@ class LearnerTests(unittest.TestCase):
             env.reset()
             seen = inputs(env, "cpu")
             for mask_input, head in ((True, "flat"), (False, "flat"), (True, "pair"),
-                                     (False, "pair")):
+                                     (False, "pair"), (True, "target"), (False, "target")):
                 model = Policy(env.actions, env.float_count, 16, 16, mask_input, head)
                 _, value = model(seen)
                 self.assertEqual(value.shape, (8,))
@@ -309,6 +309,8 @@ class LearnerTests(unittest.TestCase):
         self.assertNotEqual(first[1], run(seed=2)[1])
         # The number of environment threads changes nothing.
         self.assertEqual(first, run(env_threads=1))
+        target = run(head="target")
+        self.assertEqual(target, run(head="target"))
 
     def test_scripted_opponents_are_not_learned(self):
         for opponent in ("random", "idle"):
@@ -509,7 +511,8 @@ class LearnerTests(unittest.TestCase):
         self.assertEqual((config.envs, config.mask_input, config.gamma, config.deterministic),
                          (4, False, 0.5, True))
         self.assertEqual((config.trim, parse(["--trim", "useless"]).trim), ("harmful", "useless"))
-        self.assertEqual((config.face_enemy, config.repeat_moves), (True, False))
+        self.assertEqual((config.face_enemy, config.repeat_moves, config.sight),
+                         (True, False, True))
         config = parse(["--no-face-enemy", "--repeat-moves", "--eval-opponents", "idle,random"])
         self.assertEqual((config.face_enemy, config.repeat_moves), (False, True))
         for wrong in (["--trim", "all"], ["--eval-opponents", "idle,me"], ["--layers", "0"]):
@@ -525,6 +528,31 @@ class LearnerTests(unittest.TestCase):
             found = {name.split("/")[1].split("_")[0] for name in history[0]
                      if name.startswith("eval/")}
             self.assertEqual(found, expected)
+
+    def test_checkpoints_as_opponents(self):
+        """Networks that do not learn, as evaluation opponents: the same fights each time."""
+        from leekrl.train import reference_path
+        self.assertEqual(reference_path("long-2:10000"),
+                         ROOT / "runs" / "long-2" / "checkpoint_010000.pt")
+        with tempfile.TemporaryDirectory() as folder:
+            train(small(updates=1, save_every=1), folder)
+            reference = str(Path(folder) / "checkpoint_000001.pt")
+            plain = Path(folder) / "plain"
+            train(small(updates=1, save_every=1, sight=False), plain)
+            config = small(updates=2, eval_every=1, eval_fights=4,
+                           eval_opponents=f"idle,{reference},{plain / 'checkpoint_000001.pt'}")
+            _, history = train(config, Path(folder) / "first")
+            _, again = train(config, Path(folder) / "second")
+            for metrics in history:
+                for name in ("wins", "losses", "draws"):
+                    self.assertIn(f"eval/{reference}_{name}", metrics)
+            self.assertEqual([m[f"eval/{reference}_wins"] for m in history],
+                             [m[f"eval/{reference}_wins"] for m in again])
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                parse(["--eval-opponents", "idle,nowhere:5"])
+            with self.assertRaisesRegex(ValueError, "turned otherwise"):
+                train(small(updates=1, eval_every=1, eval_fights=4, face_enemy=False,
+                            eval_opponents=reference), Path(folder) / "third")
 
     def test_sight(self):
         """The sight lists reach the network, the rollout and training."""
@@ -572,8 +600,8 @@ class LearnerTests(unittest.TestCase):
             results = evaluate(loaded, small(), (), 4, 1, (plain,))
             self.assertAlmostEqual(sum(results[0][k] for k in ("wins", "losses", "draws")), 1)
             with self.assertRaisesRegex(ValueError, "another network"):
-                train(small(updates=3, resume=str(Path(folder) / "checkpoint_000002.pt")),
-                      folder)
+                train(small(updates=3, sight=False,
+                            resume=str(Path(folder) / "checkpoint_000002.pt")), folder)
 
     def test_older_runs(self):
         """What the settings of older runs do not say."""

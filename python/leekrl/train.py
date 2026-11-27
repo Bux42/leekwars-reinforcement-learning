@@ -14,6 +14,7 @@ import copy
 import json
 import os
 import random
+import re
 import signal
 import subprocess
 import threading
@@ -46,14 +47,16 @@ class Config:
     trim: str = "harmful"          # casts masked: nothing, useless, or harmful ones too
     face_enemy: bool = True        # turn the world so that the enemy leek is always there
     repeat_moves: bool = False     # allow moving right after a move
-    sight: bool = False            # the cells from which the enemy leek can be seen
+    sight: bool = True             # the cells from which the enemy leek can be seen
     opponent: str = "self"         # self, or random or idle: not learned
     # Network
     branch: int = 128
     hidden: int = 256
     layers: int = 2
     mask_input: bool = True
-    head: str = "flat"             # flat (one output per action) or pair (item x cell)
+    # flat (one output per action), pair (item x cell), or target (a small network that
+    # sees the situation, the item and the target cell)
+    head: str = "flat"
     # PPO
     gamma: float = 0.999
     lam: float = 0.95
@@ -73,7 +76,9 @@ class Config:
     deterministic: bool = False
     eval_every: int = 100          # updates between evaluations, 0 to disable
     eval_fights: int = 200
-    eval_opponents: str = "idle"   # among idle and random, separated by commas
+    # Separated by commas: idle, random, or networks that do not learn, as run:update
+    # (runs/<run>/checkpoint_<update>.pt) or a checkpoint's path.
+    eval_opponents: str = "idle"
     save_every: int = 50
     peek_every: int = 0            # updates between pages showing fights, 0 to disable
     peek_fights: int = 2
@@ -285,6 +290,34 @@ def evaluate(model, config, known, fights, seed, opponents=("random",), greedy=F
              "turns": float(turns[faced == i].mean())} for i in range(len(opponents))]
 
 
+SCRIPTED = ("idle", "random")
+
+
+def reference_path(name):
+    """The checkpoint of an evaluation opponent: run:update, or a path."""
+    match = re.fullmatch(r"([\w.-]+):(\d+)", name)
+    if match:
+        return ROOT / "runs" / match.group(1) / f"checkpoint_{int(match.group(2)):06d}.pt"
+    return Path(name)
+
+
+def opponent(name, device, data_hash, face_enemy):
+    """An evaluation opponent: its name if scripted, else its network, which must play the
+    same game in the same world."""
+    if name in SCRIPTED:
+        return name
+    path = reference_path(name)
+    if not path.is_file():
+        raise ValueError(f"evaluation opponent {name!r}: no checkpoint at {path}")
+    model, data = load_policy(path, device)
+    if data["data_hash"] != data_hash:
+        raise ValueError(f"evaluation opponent {name!r} was trained with other game data")
+    if world(data["config"])["face_enemy"] != face_enemy:
+        raise ValueError(f"evaluation opponent {name!r} was trained in a world turned "
+                         "otherwise")
+    return model
+
+
 def commit():
     try:
         return subprocess.run(["git", "describe", "--always", "--dirty"], cwd=ROOT,
@@ -412,6 +445,7 @@ def train(config, folder=None):
         start, decisions, fights.total = data["update"], data["decisions"], data["fights"]
     log = Log(config, folder, details)
     opponents = [name for name in config.eval_opponents.split(",") if name]
+    players = [opponent(name, device, env.data_hash, config.face_enemy) for name in opponents]
     rollout = Rollout(env, config.steps, device)
     history = []
     env.reset()
@@ -443,10 +477,11 @@ def train(config, folder=None):
                 last = step == config.updates or bool(stop)
                 if opponents and config.eval_every and (step % config.eval_every == 0 or last):
                     began = time.perf_counter()
-                    for opponent, result in zip(opponents, evaluate(
-                            model, config, known, config.eval_fights, 1_000_003, opponents)):
+                    # The same fights each time, to compare.
+                    for label, result in zip(opponents, evaluate(
+                            model, config, known, config.eval_fights, 1_000_003, players)):
                         for name, value in result.items():
-                            metrics[f"eval/{opponent}_{name}"] = value
+                            metrics[f"eval/{label}_{name}"] = value
                     metrics["time/eval_seconds"] = time.perf_counter() - began
                 log.write(step, metrics)
                 history.append(metrics)
@@ -488,10 +523,12 @@ def parse(arguments=None):
         parser.error(f"--trim must be one of {', '.join(TRIMS)}")
     if config.layers < 1:
         parser.error("--layers must be at least 1")
-    if not {"idle", "random"}.issuperset(filter(None, config.eval_opponents.split(","))):
-        parser.error("--eval-opponents must be among idle and random")
-    if config.head not in ("flat", "pair"):
-        parser.error("--head must be flat or pair")
+    for name in filter(None, config.eval_opponents.split(",")):
+        if name not in SCRIPTED and not reference_path(name).is_file():
+            parser.error(f"--eval-opponents: {name!r} is neither idle, random, nor a "
+                         "checkpoint (run:update or a path)")
+    if config.head not in ("flat", "pair", "target"):
+        parser.error("--head must be flat, pair or target")
     if config.wandb not in ("disabled", "offline", "online"):
         parser.error("--wandb must be disabled, offline or online")
     return config
